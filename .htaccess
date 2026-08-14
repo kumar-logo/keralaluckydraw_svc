@@ -1,0 +1,20 @@
+RewriteEngine On
+
+# Let ACME / Let's Encrypt challenges through for SSL issuance
+RewriteCond %{REQUEST_URI} ^/\.well-known/ [NC]
+RewriteRule ^ - [L]
+
+# WebSocket upgrade -> Node.js (port 3000)
+RewriteCond %{HTTP:Upgrade} websocket [NC]
+RewriteCond %{HTTP:Connection} upgrade [NC]
+RewriteRule ^(.*)$ ws://localhost:3000/$1 [P,L]
+
+# Proxy everything else (admin panel, admin API, SPA API, uploads) -> Node.js
+RewriteRule ^(.*)$ http://localhost:3000/$1 [P,L]
+
+# Forward the real client IP / scheme to Node
+<IfModule mod_headers.c>
+  RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"
+  RequestHeader set X-Forwarded-For "%{REMOTE_ADDR}s"
+  RequestHeader set X-Forwarded-Proto "%{REQUEST_SCHEME}s"
+</IfModule>

@@ -27,6 +27,11 @@ yarn-error.log*
 # local env files
 .env*.local
 .env
+.env.template
+
+# local test harness
+e2e-verify.mjs
+verify-issue3.mjs
 
 # vercel
 .vercel
@@ -34,3 +39,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/dist
+/.claude
+server-error.log
+server.log
+
+# local test harness
+e2e-asks.mjs
