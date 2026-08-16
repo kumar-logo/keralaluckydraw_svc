@@ -4,24 +4,23 @@ import {
   Column,
   CreateDateColumn,
   Index,
-  Unique,
 } from 'typeorm';
 
-@Entity('chat_group_member')
-@Unique('uk_group_member', ['groupId', 'userId'])
-export class ChatGroupMember {
-  @PrimaryGeneratedColumn({ type: 'int', unsigned: true })
+@Entity('chat_mention')
+@Index('uk_mention_msg_user', ['messageId', 'userId'], { unique: true })
+@Index('idx_mention_unread', ['userId', 'groupId', 'messageId'])
+export class ChatMention {
+  @PrimaryGeneratedColumn({ type: 'bigint', unsigned: true })
   id: number;
 
   @Column({ name: 'group_id', type: 'int', unsigned: true })
   groupId: number;
 
-  @Index('idx_member_user')
   @Column({ name: 'user_id', type: 'varchar', length: 32 })
   userId: string;
 
-  @Column({ type: 'varchar', length: 16, default: 'member' })
-  role: string;
+  @Column({ name: 'message_id', type: 'bigint', unsigned: true })
+  messageId: number;
 
   @CreateDateColumn({ name: 'created_at', precision: 6 })
   createdAt: Date;

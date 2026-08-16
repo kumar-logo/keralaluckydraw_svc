@@ -1322,5 +1322,304 @@ PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 --   SELECT * FROM chat_read LIMIT 5;
 
 -- =============================================================================
+-- §43  GROUP CHAT PHASE 1: join model + discovery (2026-08-15)
+-- -----------------------------------------------------------------------------
+-- chat_group gains the join model (join_policy auto|open|invite), discovery
+-- (visibility, description, member_count) and the denormalised last-message
+-- pointer used for cheap unread + DM/room ordering; chat_group_member gains a
+-- role. Legacy public rooms are backfilled to join_policy='auto' (implicit
+-- membership, nothing breaks). Mirrors migration 1741340000000. Idempotent.
+-- =============================================================================
+
+SET @has_jp := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND COLUMN_NAME = 'join_policy');
+SET @sql := IF(@has_jp = 0,
+  'ALTER TABLE `chat_group` ADD COLUMN `join_policy` VARCHAR(16) NOT NULL DEFAULT ''auto''',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_vis := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND COLUMN_NAME = 'visibility');
+SET @sql := IF(@has_vis = 0,
+  'ALTER TABLE `chat_group` ADD COLUMN `visibility` VARCHAR(16) NOT NULL DEFAULT ''listed''',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_desc := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND COLUMN_NAME = 'description');
+SET @sql := IF(@has_desc = 0,
+  'ALTER TABLE `chat_group` ADD COLUMN `description` VARCHAR(255) NOT NULL DEFAULT ''''',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_mc := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND COLUMN_NAME = 'member_count');
+SET @sql := IF(@has_mc = 0,
+  'ALTER TABLE `chat_group` ADD COLUMN `member_count` INT UNSIGNED NOT NULL DEFAULT 0',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_lmi := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND COLUMN_NAME = 'last_message_id');
+SET @sql := IF(@has_lmi = 0,
+  'ALTER TABLE `chat_group` ADD COLUMN `last_message_id` BIGINT UNSIGNED NOT NULL DEFAULT 0',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_lma := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND COLUMN_NAME = 'last_message_at');
+SET @sql := IF(@has_lma = 0,
+  'ALTER TABLE `chat_group` ADD COLUMN `last_message_at` DATETIME(6) NULL',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_role := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group_member'
+    AND COLUMN_NAME = 'role');
+SET @sql := IF(@has_role = 0,
+  'ALTER TABLE `chat_group_member` ADD COLUMN `role` VARCHAR(16) NOT NULL DEFAULT ''member''',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_disc_idx := (SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND INDEX_NAME = 'idx_group_disc');
+SET @sql := IF(@has_disc_idx = 0,
+  'ALTER TABLE `chat_group` ADD INDEX `idx_group_disc` (`status`, `visibility`, `join_policy`, `sort_order`, `id`)',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+UPDATE `chat_group` SET `join_policy` = 'auto' WHERE `type` = 'public';
+
+UPDATE `chat_group` g
+LEFT JOIN (
+  SELECT `group_id`, MAX(`id`) AS max_id
+  FROM `chat_message` WHERE `status` = 1
+  GROUP BY `group_id`
+) m ON m.group_id = g.id
+SET g.last_message_id = COALESCE(m.max_id, 0)
+WHERE g.last_message_id = 0;
+
+UPDATE `chat_group` g
+JOIN `chat_message` cm ON cm.id = g.last_message_id
+SET g.last_message_at = cm.created_at
+WHERE g.last_message_id > 0 AND g.last_message_at IS NULL;
+
+UPDATE `chat_group` g
+SET g.member_count = (
+  SELECT COUNT(*) FROM `chat_group_member` gm WHERE gm.group_id = g.id
+);
+
+-- Verify:
+--   SELECT id, name, type, join_policy, visibility, member_count, last_message_id FROM chat_group;
+--   SHOW COLUMNS FROM chat_group_member LIKE 'role';
+
+-- =============================================================================
+-- §44  GROUP CHAT PHASE 1: direct messages (2026-08-15)
+-- -----------------------------------------------------------------------------
+-- chat_group gains the DM overlay: is_dm flag, unique dm_key (support DM =
+-- 'dm:support:u<userId>' with dm_admin_id NULL until claimed; admin DM =
+-- 'dm:a<adminId>:u<userId>'), and dm_admin_id / dm_user_id participant keys.
+-- Mirrors migration 1741350000000. Idempotent.
+-- =============================================================================
+
+SET @has_isdm := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND COLUMN_NAME = 'is_dm');
+SET @sql := IF(@has_isdm = 0,
+  'ALTER TABLE `chat_group` ADD COLUMN `is_dm` TINYINT NOT NULL DEFAULT 0',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_dmk := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND COLUMN_NAME = 'dm_key');
+SET @sql := IF(@has_dmk = 0,
+  'ALTER TABLE `chat_group` ADD COLUMN `dm_key` VARCHAR(80) NULL',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_dma := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND COLUMN_NAME = 'dm_admin_id');
+SET @sql := IF(@has_dma = 0,
+  'ALTER TABLE `chat_group` ADD COLUMN `dm_admin_id` VARCHAR(32) NULL',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_dmu := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND COLUMN_NAME = 'dm_user_id');
+SET @sql := IF(@has_dmu = 0,
+  'ALTER TABLE `chat_group` ADD COLUMN `dm_user_id` VARCHAR(32) NULL',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_dm_uk := (SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND INDEX_NAME = 'uk_chat_group_dm');
+SET @sql := IF(@has_dm_uk = 0,
+  'ALTER TABLE `chat_group` ADD UNIQUE INDEX `uk_chat_group_dm` (`dm_key`)',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_dm_ai := (SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND INDEX_NAME = 'idx_dm_admin');
+SET @sql := IF(@has_dm_ai = 0,
+  'ALTER TABLE `chat_group` ADD INDEX `idx_dm_admin` (`dm_admin_id`, `last_message_id`)',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_dm_ui := (SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND INDEX_NAME = 'idx_dm_user');
+SET @sql := IF(@has_dm_ui = 0,
+  'ALTER TABLE `chat_group` ADD INDEX `idx_dm_user` (`dm_user_id`, `last_message_id`)',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- Verify:
+--   SHOW INDEX FROM chat_group WHERE Key_name IN ('uk_chat_group_dm','idx_dm_admin','idx_dm_user');
+--   SELECT id, dm_key, dm_admin_id, dm_user_id FROM chat_group WHERE is_dm = 1;
+
+-- =============================================================================
+-- §45  GROUP CHAT PHASE 1: voice + message kind (2026-08-15)
+-- -----------------------------------------------------------------------------
+-- chat_message gains kind (text|image|voice|system), audio_url, duration_ms and
+-- audio_waveform (40 comma-joined peaks). Existing image rows are backfilled to
+-- kind='image'. Mirrors migration 1741360000000. Idempotent.
+-- =============================================================================
+
+SET @has_kind := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_message'
+    AND COLUMN_NAME = 'kind');
+SET @sql := IF(@has_kind = 0,
+  'ALTER TABLE `chat_message` ADD COLUMN `kind` VARCHAR(16) NOT NULL DEFAULT ''text'' AFTER `sender_avatar`',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_au := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_message'
+    AND COLUMN_NAME = 'audio_url');
+SET @sql := IF(@has_au = 0,
+  'ALTER TABLE `chat_message` ADD COLUMN `audio_url` VARCHAR(500) NULL AFTER `image_url`',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_dms := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_message'
+    AND COLUMN_NAME = 'duration_ms');
+SET @sql := IF(@has_dms = 0,
+  'ALTER TABLE `chat_message` ADD COLUMN `duration_ms` INT UNSIGNED NULL AFTER `audio_url`',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_awf := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_message'
+    AND COLUMN_NAME = 'audio_waveform');
+SET @sql := IF(@has_awf = 0,
+  'ALTER TABLE `chat_message` ADD COLUMN `audio_waveform` VARCHAR(255) NULL AFTER `duration_ms`',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+UPDATE `chat_message` SET `kind` = 'image'
+  WHERE `image_url` IS NOT NULL AND `kind` = 'text';
+
+-- Verify:
+--   SHOW COLUMNS FROM chat_message LIKE 'kind';
+--   SELECT kind, COUNT(*) FROM chat_message GROUP BY kind;
+
+-- =============================================================================
+-- §46  GROUP CHAT PHASE 1: mentions + receipts + voice/DM toggles (2026-08-15)
+-- -----------------------------------------------------------------------------
+-- chat_mention (per-user mention index driving the mentions inbox + unread
+-- badge), chat_read gains delivered / mention pointers, and app_config gains the
+-- voice + DM feature toggles. Mirrors migration 1741370000000. Idempotent.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS `chat_mention` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `group_id` INT UNSIGNED NOT NULL,
+  `user_id` VARCHAR(32) NOT NULL,
+  `message_id` BIGINT UNSIGNED NOT NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_mention_msg_user` (`message_id`, `user_id`),
+  KEY `idx_mention_unread` (`user_id`, `group_id`, `message_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+SET @has_ldi := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_read'
+    AND COLUMN_NAME = 'last_delivered_id');
+SET @sql := IF(@has_ldi = 0,
+  'ALTER TABLE `chat_read` ADD COLUMN `last_delivered_id` BIGINT UNSIGNED NOT NULL DEFAULT 0',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_lrm := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_read'
+    AND COLUMN_NAME = 'last_read_mention_id');
+SET @sql := IF(@has_lrm = 0,
+  'ALTER TABLE `chat_read` ADD COLUMN `last_read_mention_id` BIGINT UNSIGNED NOT NULL DEFAULT 0',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_um := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_read'
+    AND COLUMN_NAME = 'unread_mentions');
+SET @sql := IF(@has_um = 0,
+  'ALTER TABLE `chat_read` ADD COLUMN `unread_mentions` INT UNSIGNED NOT NULL DEFAULT 0',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_gc_voice := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'app_config'
+    AND COLUMN_NAME = 'group_chat_voice_enabled');
+SET @sql := IF(@has_gc_voice = 0,
+  'ALTER TABLE `app_config` ADD COLUMN `group_chat_voice_enabled` TINYINT NOT NULL DEFAULT 1',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_gc_dm := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'app_config'
+    AND COLUMN_NAME = 'group_chat_dm_enabled');
+SET @sql := IF(@has_gc_dm = 0,
+  'ALTER TABLE `app_config` ADD COLUMN `group_chat_dm_enabled` TINYINT NOT NULL DEFAULT 1',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- Verify:
+--   SELECT group_chat_voice_enabled, group_chat_dm_enabled FROM app_config;
+--   SHOW COLUMNS FROM chat_read LIKE 'last_delivered_id';
+--   SELECT * FROM chat_mention LIMIT 5;
+
+-- =============================================================================
+-- §47  GROUP CHAT: admin-only (announcement) posting policy (2026-08-16)
+-- -----------------------------------------------------------------------------
+-- chat_group gains post_policy ('all' | 'admin_only'). When 'admin_only', only
+-- platform admins may post; regular members can join and read but their message
+-- input is hidden. Mirrors migration 1741380000000. Idempotent.
+-- =============================================================================
+
+SET @has_pp := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_group'
+    AND COLUMN_NAME = 'post_policy');
+SET @sql := IF(@has_pp = 0,
+  'ALTER TABLE `chat_group` ADD COLUMN `post_policy` VARCHAR(16) NOT NULL DEFAULT ''all'' AFTER `join_policy`',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- Verify:
+--   SHOW COLUMNS FROM chat_group LIKE 'post_policy';
+--   SELECT id, name, post_policy FROM chat_group;
+
+-- =============================================================================
 -- END OF live-db-update.sql
 -- =============================================================================

@@ -217,6 +217,8 @@ export class ConfigLoaderService implements OnModuleInit {
     enabled: boolean;
     blockLinks: boolean;
     imageEnabled: boolean;
+    voiceEnabled: boolean;
+    dmEnabled: boolean;
     badWords: string;
   }> {
     const app = await this.getAppConfigEntity();
@@ -224,7 +226,9 @@ export class ConfigLoaderService implements OnModuleInit {
       enabled: app.groupChatEnabled === 1,
       blockLinks: app.groupChatBlockLinks === 1,
       imageEnabled: app.groupChatImageEnabled === 1,
-      badWords: app.groupChatBadWords ?? '',
+      voiceEnabled: app.groupChatVoiceEnabled === 1,
+      dmEnabled: app.groupChatDmEnabled === 1,
+      badWords: app.groupChatBadWords === null ? '' : app.groupChatBadWords,
     };
   }
 

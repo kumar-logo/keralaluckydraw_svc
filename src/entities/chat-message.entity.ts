@@ -28,11 +28,23 @@ export class ChatMessage {
   @Column({ name: 'sender_avatar', type: 'varchar', length: 255, default: '' })
   senderAvatar: string;
 
+  @Column({ type: 'varchar', length: 16, default: 'text' })
+  kind: string;
+
   @Column({ type: 'varchar', length: 1000, default: '' })
   content: string;
 
   @Column({ name: 'image_url', type: 'varchar', length: 500, nullable: true })
   imageUrl: string | null;
+
+  @Column({ name: 'audio_url', type: 'varchar', length: 500, nullable: true })
+  audioUrl: string | null;
+
+  @Column({ name: 'duration_ms', type: 'int', unsigned: true, nullable: true })
+  durationMs: number | null;
+
+  @Column({ name: 'audio_waveform', type: 'varchar', length: 255, nullable: true })
+  audioWaveform: string | null;
 
   @Column({ name: 'reply_to_id', type: 'bigint', unsigned: true, nullable: true })
   replyToId: number | null;

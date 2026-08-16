@@ -28,6 +28,44 @@ export class ChatGroup {
   @Column({ name: 'created_by', type: 'varchar', length: 32, default: '' })
   createdBy: string;
 
+  @Column({ name: 'join_policy', type: 'varchar', length: 16, default: 'auto' })
+  joinPolicy: string;
+
+  @Column({ name: 'post_policy', type: 'varchar', length: 16, default: 'all' })
+  postPolicy: string;
+
+  @Column({ type: 'varchar', length: 16, default: 'listed' })
+  visibility: string;
+
+  @Column({ type: 'varchar', length: 255, default: '' })
+  description: string;
+
+  @Column({ name: 'member_count', type: 'int', unsigned: true, default: 0 })
+  memberCount: number;
+
+  @Column({
+    name: 'last_message_id',
+    type: 'bigint',
+    unsigned: true,
+    default: 0,
+  })
+  lastMessageId: number;
+
+  @Column({ name: 'last_message_at', type: 'datetime', precision: 6, nullable: true })
+  lastMessageAt: Date | null;
+
+  @Column({ name: 'is_dm', type: 'tinyint', default: 0 })
+  isDm: number;
+
+  @Column({ name: 'dm_key', type: 'varchar', length: 80, nullable: true })
+  dmKey: string | null;
+
+  @Column({ name: 'dm_admin_id', type: 'varchar', length: 32, nullable: true })
+  dmAdminId: string | null;
+
+  @Column({ name: 'dm_user_id', type: 'varchar', length: 32, nullable: true })
+  dmUserId: string | null;
+
   @CreateDateColumn({ name: 'created_at', precision: 6 })
   createdAt: Date;
 }

@@ -8,6 +8,7 @@ import { Announcement } from '../../entities/announcement.entity';
 import { SystemConfig } from '../../entities/system-config.entity';
 import { ChatGroup } from '../../entities/chat-group.entity';
 import { ChatGroupMember } from '../../entities/chat-group-member.entity';
+import { ChatRead } from '../../entities/chat-read.entity';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { ChatGroupMember } from '../../entities/chat-group-member.entity';
       SystemConfig,
       ChatGroup,
       ChatGroupMember,
+      ChatRead,
     ]),
   ],
   controllers: [GameEventsController],

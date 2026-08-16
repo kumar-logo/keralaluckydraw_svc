@@ -20,7 +20,14 @@ import {
   CHAT_UPLOAD_LIMIT,
 } from '../../common/throttle/throttle.config';
 import { ChatService } from './chat.service';
-import { chatUploadOptions, chatImageUrl, removeChatUpload } from './chat-upload';
+import {
+  chatUploadOptions,
+  chatVoiceUploadOptions,
+  chatImageUrl,
+  chatAudioUrl,
+  removeChatUpload,
+} from './chat-upload';
+import { DmScope } from './chat.enums';
 import {
   SendMessageDto,
   HistoryDto,
@@ -35,6 +42,12 @@ import {
   MemberDto,
   PageQueryDto,
   ChatSettingsDto,
+  JoinDto,
+  DiscoverQueryDto,
+  DmOpenDto,
+  DeliveredDto,
+  UserDmQueryDto,
+  AdminDmQueryDto,
 } from './chat.dto';
 
 @Controller('hall/api/chat/v1')
@@ -49,6 +62,32 @@ export class ChatController {
   @Get('unread')
   unread(@CurrentUser('userId') userId: string) {
     return this.chatService.getUnread(userId);
+  }
+
+  @Get('discover')
+  discover(
+    @CurrentUser('userId') userId: string,
+    @Query() query: DiscoverQueryDto,
+  ) {
+    return this.chatService.discoverGroups(userId, query.cursor, query.limit);
+  }
+
+  @Get('dms')
+  dms(@CurrentUser('userId') userId: string, @Query() query: UserDmQueryDto) {
+    return this.chatService.listUserDms(userId, query.cursor);
+  }
+
+  @Get('mentions')
+  mentions(@CurrentUser('userId') userId: string) {
+    return this.chatService.getMentions(userId);
+  }
+
+  @Get('dm/:id/receipts')
+  dmReceipts(
+    @CurrentUser('userId') userId: string,
+    @Param('id') id: string,
+  ) {
+    return this.chatService.getDmReceipts(userId, Number(id));
   }
 
   @HttpCode(200)
@@ -70,9 +109,34 @@ export class ChatController {
   }
 
   @HttpCode(200)
+  @Post('delivered')
+  delivered(@CurrentUser('userId') userId: string, @Body() dto: DeliveredDto) {
+    return this.chatService.advanceDelivered(dto.groupId, userId, dto.messageId);
+  }
+
+  @HttpCode(200)
   @Post('readers')
   readers(@CurrentUser('userId') userId: string, @Body() dto: MessageReadersDto) {
     return this.chatService.getMessageReaders(userId, dto.groupId, dto.messageId);
+  }
+
+  @HttpCode(200)
+  @Post('join')
+  join(@CurrentUser('userId') userId: string, @Body() dto: JoinDto) {
+    return this.chatService.joinGroup(userId, dto.groupId);
+  }
+
+  @HttpCode(200)
+  @Post('leave')
+  leave(@CurrentUser('userId') userId: string, @Body() dto: JoinDto) {
+    return this.chatService.leaveGroup(userId, dto.groupId);
+  }
+
+  @Throttle({ [ThrottleProfile.Default]: CHAT_SEND_LIMIT })
+  @HttpCode(200)
+  @Post('dm/open')
+  dmOpen(@CurrentUser('userId') userId: string) {
+    return this.chatService.openSupportDm(userId);
   }
 
   @Throttle({ [ThrottleProfile.Default]: CHAT_UPLOAD_LIMIT })
@@ -89,6 +153,20 @@ export class ChatController {
     return { url: chatImageUrl(file) };
   }
 
+  @Throttle({ [ThrottleProfile.Default]: CHAT_UPLOAD_LIMIT })
+  @HttpCode(200)
+  @Post('voice')
+  @UseInterceptors(FileInterceptor('file', chatVoiceUploadOptions))
+  async voice(@UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('No file uploaded');
+    const settings = await this.chatService.getChatSettings();
+    if (!settings.enabled || !settings.voiceEnabled) {
+      await removeChatUpload(file.path);
+      throw new BadRequestException('Voice messages are disabled');
+    }
+    return { url: chatAudioUrl(file) };
+  }
+
   @Throttle({ [ThrottleProfile.Default]: CHAT_SEND_LIMIT })
   @HttpCode(200)
   @Post('send')
@@ -98,6 +176,10 @@ export class ChatController {
       imageUrl: dto.imageUrl,
       replyToId: dto.replyToId,
       mentions: dto.mentions,
+      kind: dto.kind,
+      audioUrl: dto.audioUrl,
+      durationMs: dto.durationMs,
+      audioWaveform: dto.audioWaveform,
     });
   }
 }
@@ -123,7 +205,7 @@ export class AdminChatController {
 
   @Post('groups')
   createGroup(@CurrentUser('sub') adminId: number, @Body() dto: CreateGroupDto) {
-    return this.chatService.createGroup(dto.name, dto.type, dto.avatar, String(adminId));
+    return this.chatService.createGroup(dto, String(adminId));
   }
 
   @Post('groups/:id')
@@ -151,6 +233,24 @@ export class AdminChatController {
     return this.chatService.removeMember(dto.groupId, dto.userId);
   }
 
+  @Get('dms')
+  dms(@CurrentUser('sub') adminId: number, @Query() query: AdminDmQueryDto) {
+    const scope = query.scope === undefined ? DmScope.Mine : query.scope;
+    return this.chatService.listAdminDms(String(adminId), scope, query.cursor);
+  }
+
+  @HttpCode(200)
+  @Post('dm/open')
+  dmOpen(@CurrentUser('sub') adminId: number, @Body() dto: DmOpenDto) {
+    return this.chatService.adminOpenDm(String(adminId), dto.userId);
+  }
+
+  @HttpCode(200)
+  @Post('dm/:id/claim')
+  dmClaim(@CurrentUser('sub') adminId: number, @Param('id') id: string) {
+    return this.chatService.adminClaimDm(String(adminId), Number(id));
+  }
+
   @HttpCode(200)
   @Post('history')
   history(@Body() dto: HistoryDto) {
@@ -172,6 +272,28 @@ export class AdminChatController {
   }
 
   @HttpCode(200)
+  @Post('group-avatar')
+  @UseInterceptors(FileInterceptor('file', chatUploadOptions))
+  groupAvatar(@UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('No file uploaded');
+    return { url: chatImageUrl(file) };
+  }
+
+  @Throttle({ [ThrottleProfile.Default]: CHAT_UPLOAD_LIMIT })
+  @HttpCode(200)
+  @Post('voice')
+  @UseInterceptors(FileInterceptor('file', chatVoiceUploadOptions))
+  async voice(@UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('No file uploaded');
+    const settings = await this.chatService.getChatSettings();
+    if (!settings.enabled || !settings.voiceEnabled) {
+      await removeChatUpload(file.path);
+      throw new BadRequestException('Voice messages are disabled');
+    }
+    return { url: chatAudioUrl(file) };
+  }
+
+  @HttpCode(200)
   @Post('send')
   send(@CurrentUser('sub') adminId: number, @Body() dto: AdminSendMessageDto) {
     return this.chatService.sendAdminMessage(String(adminId), dto.groupId, {
@@ -179,6 +301,10 @@ export class AdminChatController {
       imageUrl: dto.imageUrl,
       replyToId: dto.replyToId,
       mentions: dto.mentions,
+      kind: dto.kind,
+      audioUrl: dto.audioUrl,
+      durationMs: dto.durationMs,
+      audioWaveform: dto.audioWaveform,
     });
   }
 

@@ -266,7 +266,7 @@ export class OperationsService {
     const pageSize = dto.pageSize;
     const pageNum = dto.pageNum;
 
-    const allGamesRaw = await this.gameListRepo
+    const allGames = await this.gameListRepo
       .createQueryBuilder('g')
       .where('g.status = :status', { status: 1 })
       .andWhere('g.is_hidden = :hidden', { hidden: 0 })
@@ -277,14 +277,6 @@ export class OperationsService {
       )
       .orderBy('g.sort_order', 'ASC')
       .getMany();
-
-    const seenQuickType = new Set<string>();
-    const allGames = allGamesRaw.filter((g) => {
-      if (g.isQuick !== 1) return true;
-      if (seenQuickType.has(g.gameType)) return false;
-      seenQuickType.add(g.gameType);
-      return true;
-    });
 
     const nowSec = Math.floor(Date.now() / 1000);
 

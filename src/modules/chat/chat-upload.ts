@@ -7,13 +7,22 @@ import { BadRequestException } from '@nestjs/common';
 import type { MulterOptions } from '@nestjs/platform-express/multer/interfaces/multer-options.interface';
 
 const CHAT_UPLOAD_DIR = join(process.cwd(), 'uploads', 'chat');
+const CHAT_VOICE_DIR = join(process.cwd(), 'uploads', 'chat', 'voice');
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
+const MAX_VOICE_SIZE = 10 * 1024 * 1024;
 
 const MIME_EXT: Record<string, string> = {
   'image/jpeg': '.jpg',
   'image/png': '.png',
   'image/gif': '.gif',
   'image/webp': '.webp',
+};
+
+const VOICE_MIME_EXT: Record<string, string> = {
+  'audio/webm': '.webm',
+  'audio/mp4': '.m4a',
+  'audio/mpeg': '.mp3',
+  'audio/ogg': '.ogg',
 };
 
 export const chatUploadOptions: MulterOptions = {
@@ -43,8 +52,38 @@ export const chatUploadOptions: MulterOptions = {
   },
 };
 
+export const chatVoiceUploadOptions: MulterOptions = {
+  storage: diskStorage({
+    destination: (_req, _file, cb) => {
+      if (!existsSync(CHAT_VOICE_DIR)) {
+        mkdirSync(CHAT_VOICE_DIR, { recursive: true });
+      }
+      cb(null, CHAT_VOICE_DIR);
+    },
+    filename: (_req, file, cb) => {
+      const ext = VOICE_MIME_EXT[file.mimetype];
+      if (!ext) {
+        cb(new BadRequestException('Invalid audio type'), '');
+        return;
+      }
+      cb(null, `${uuidv4()}${ext}`);
+    },
+  }),
+  limits: { fileSize: MAX_VOICE_SIZE },
+  fileFilter: (_req, file, cb) => {
+    if (VOICE_MIME_EXT[file.mimetype]) {
+      cb(null, true);
+    } else {
+      cb(new BadRequestException('Invalid audio type'), false);
+    }
+  },
+};
+
 export const chatImageUrl = (file: Express.Multer.File): string =>
   `/uploads/chat/${file.filename}`;
+
+export const chatAudioUrl = (file: Express.Multer.File): string =>
+  `/uploads/chat/voice/${file.filename}`;
 
 export const removeChatUpload = (filePath: string): Promise<void> =>
   unlink(filePath).catch(() => undefined);

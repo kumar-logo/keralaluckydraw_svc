@@ -14,7 +14,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ChatGroup } from '../../entities/chat-group.entity';
 import { ChatGroupMember } from '../../entities/chat-group-member.entity';
+import { ChatRead } from '../../entities/chat-read.entity';
 import { GameEventsService, GameEventKind } from './game-events.service';
+import { GroupType, JoinPolicy } from '../chat/chat.enums';
+import { ChatDeliveredPayload } from '../chat/chat.events';
 
 interface BroadcastPayload {
   serverTime: number;
@@ -25,9 +28,11 @@ type AuthedSocket = Socket & {
   userId?: string;
   adminId?: string;
   lastTypingAt?: number;
+  lastDeliveredAt?: number;
 };
 
 const TYPING_THROTTLE_MS = 900;
+const RECEIPTS_MEMBER_CAP = 50;
 
 @WebSocketGateway({
   cors: { origin: '*' },
@@ -41,6 +46,8 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   private userSockets = new Map<string, Set<string>>();
 
+  private adminSockets = new Map<string, Set<string>>();
+
   constructor(
     private readonly jwtService: JwtService,
     private readonly gameEvents: GameEventsService,
@@ -48,6 +55,8 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly chatGroupRepo: Repository<ChatGroup>,
     @InjectRepository(ChatGroupMember)
     private readonly chatMemberRepo: Repository<ChatGroupMember>,
+    @InjectRepository(ChatRead)
+    private readonly chatReadRepo: Repository<ChatRead>,
   ) {}
 
   handleConnection(client: Socket) {
@@ -79,6 +88,14 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       if (sockets) {
         sockets.delete(client.id);
         if (sockets.size === 0) this.userSockets.delete(userId);
+      }
+    }
+    const adminId = (client as AuthedSocket).adminId;
+    if (adminId) {
+      const adminSet = this.adminSockets.get(adminId);
+      if (adminSet) {
+        adminSet.delete(client.id);
+        if (adminSet.size === 0) this.adminSockets.delete(adminId);
       }
     }
     this.clients.delete(client.id);
@@ -125,10 +142,10 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
     const group = await this.chatGroupRepo.findOne({
       where: { id: groupId, status: 1 },
-      select: { id: true, type: true },
+      select: { id: true, joinPolicy: true },
     });
     if (!group) return { event: 'chat:subscribed', data: { groupId, ok: false } };
-    let allowed = group.type !== 'private' || !!socket.adminId;
+    let allowed = !!socket.adminId || group.joinPolicy === JoinPolicy.Auto;
     if (!allowed && socket.userId) {
       const member = await this.chatMemberRepo.findOne({
         where: { groupId, userId: socket.userId },
@@ -138,6 +155,62 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
     if (allowed) client.join(`chat_${groupId}`);
     return { event: 'chat:subscribed', data: { groupId, ok: allowed } };
+  }
+
+  @SubscribeMessage('chat:delivered_ack')
+  async handleChatDelivered(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { groupId: number; messageId: number },
+  ) {
+    if (!data || !data.groupId || !data.messageId) return;
+    const socket = client as AuthedSocket;
+    const hasAdmin = typeof socket.adminId === 'string';
+    const hasUser = typeof socket.userId === 'string';
+    if (!hasAdmin && !hasUser) return;
+    const now = Date.now();
+    if (
+      socket.lastDeliveredAt &&
+      now - socket.lastDeliveredAt < TYPING_THROTTLE_MS
+    ) {
+      return;
+    }
+    socket.lastDeliveredAt = now;
+    const group = await this.chatGroupRepo.findOne({
+      where: { id: data.groupId, status: 1 },
+      select: {
+        id: true,
+        type: true,
+        isDm: true,
+        memberCount: true,
+        lastMessageId: true,
+      },
+    });
+    if (!group) return;
+    const receipts =
+      group.isDm === 1 ||
+      (group.type === GroupType.Private &&
+        group.memberCount <= RECEIPTS_MEMBER_CAP);
+    if (!receipts) return;
+    const memberKey = hasAdmin
+      ? `admin_${socket.adminId}`
+      : socket.userId === undefined
+        ? ''
+        : socket.userId;
+    if (memberKey === '') return;
+    const max = Number(group.lastMessageId);
+    const clamped = max > 0 && data.messageId > max ? max : data.messageId;
+    if (clamped <= 0) return;
+    await this.chatReadRepo.query(
+      `INSERT INTO chat_read (group_id, user_id, last_read_id, last_delivered_id) VALUES (?, ?, 0, ?)
+       ON DUPLICATE KEY UPDATE last_delivered_id = GREATEST(last_delivered_id, VALUES(last_delivered_id))`,
+      [data.groupId, memberKey, clamped],
+    );
+    const payload: ChatDeliveredPayload = {
+      groupId: data.groupId,
+      userId: memberKey,
+      lastDeliveredId: clamped,
+    };
+    this.server.to(`chat_${data.groupId}`).emit('chat:delivered', payload);
   }
 
   @SubscribeMessage('chat:unsubscribe')
@@ -255,6 +328,20 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
+  sendToAdmin<T>(adminId: string, event: string, data: T) {
+    const socketIds = this.adminSockets.get(adminId);
+    if (!socketIds) return;
+
+    for (const socketId of socketIds) {
+      const client = this.clients.get(socketId);
+      if (client) client.emit(event, data);
+    }
+  }
+
+  sendToAdmins<T>(event: string, data: T) {
+    this.server.to('admins').emit(event, data);
+  }
+
   private authenticateClient(client: Socket, token: string): boolean {
     if (!token) return false;
 
@@ -278,7 +365,16 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
 
       if (payload.sub !== undefined && payload.sub !== null) {
-        socket.adminId = String(payload.sub);
+        const adminId = String(payload.sub);
+        socket.adminId = adminId;
+        client.join('admins');
+        client.join(`admin_${adminId}`);
+        let adminSet = this.adminSockets.get(adminId);
+        if (!adminSet) {
+          adminSet = new Set();
+          this.adminSockets.set(adminId, adminSet);
+        }
+        adminSet.add(client.id);
         return true;
       }
 

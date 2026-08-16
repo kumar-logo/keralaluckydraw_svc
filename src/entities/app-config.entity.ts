@@ -280,6 +280,12 @@ export class AppConfig {
   @Column({ name: 'group_chat_image_enabled', type: 'tinyint', default: 1 })
   groupChatImageEnabled: number;
 
+  @Column({ name: 'group_chat_voice_enabled', type: 'tinyint', default: 1 })
+  groupChatVoiceEnabled: number;
+
+  @Column({ name: 'group_chat_dm_enabled', type: 'tinyint', default: 1 })
+  groupChatDmEnabled: number;
+
   @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
 }

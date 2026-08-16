@@ -22,6 +22,25 @@ export class ChatRead {
   @Column({ name: 'last_read_id', type: 'bigint', unsigned: true, default: 0 })
   lastReadId: number;
 
+  @Column({
+    name: 'last_delivered_id',
+    type: 'bigint',
+    unsigned: true,
+    default: 0,
+  })
+  lastDeliveredId: number;
+
+  @Column({
+    name: 'last_read_mention_id',
+    type: 'bigint',
+    unsigned: true,
+    default: 0,
+  })
+  lastReadMentionId: number;
+
+  @Column({ name: 'unread_mentions', type: 'int', unsigned: true, default: 0 })
+  unreadMentions: number;
+
   @UpdateDateColumn({ name: 'updated_at', precision: 6 })
   updatedAt: Date;
 }

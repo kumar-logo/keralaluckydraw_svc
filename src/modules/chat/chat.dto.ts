@@ -8,15 +8,21 @@ import {
   ArrayMaxSize,
   Matches,
   Min,
+  Max,
   MaxLength,
-  IsIn,
+  IsEnum,
 } from 'class-validator';
 import { Type, Transform } from 'class-transformer';
+import { GroupType, JoinPolicy, Visibility, PostPolicy, MessageKind, DmScope } from './chat.enums';
 
 const trimmed = ({ value }: { value: unknown }): string =>
   typeof value === 'string' ? value.trim() : '';
 
 const CHAT_IMAGE_PATH = /^\/uploads\/chat\/[A-Za-z0-9._-]+$/;
+
+const CHAT_AUDIO_PATH = /^\/uploads\/chat\/voice\/[A-Za-z0-9._-]+$/;
+
+const DURATION_MS_MAX = 300000;
 
 export class SendMessageDto {
   @Type(() => Number)
@@ -47,6 +53,28 @@ export class SendMessageDto {
   @IsString({ each: true })
   @MaxLength(32, { each: true })
   mentions?: string[];
+
+  @IsOptional()
+  @IsEnum(MessageKind)
+  kind?: MessageKind;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  @Matches(CHAT_AUDIO_PATH)
+  audioUrl?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(DURATION_MS_MAX)
+  durationMs?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  audioWaveform?: string;
 }
 
 export class HistoryDto {
@@ -132,6 +160,28 @@ export class AdminSendMessageDto {
   @IsString({ each: true })
   @MaxLength(32, { each: true })
   mentions?: string[];
+
+  @IsOptional()
+  @IsEnum(MessageKind)
+  kind?: MessageKind;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  @Matches(CHAT_AUDIO_PATH)
+  audioUrl?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(DURATION_MS_MAX)
+  durationMs?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  audioWaveform?: string;
 }
 
 export class CreateGroupDto {
@@ -141,13 +191,31 @@ export class CreateGroupDto {
   @MaxLength(100)
   name: string;
 
-  @IsIn(['public', 'private'])
+  @IsEnum(GroupType)
   type: string;
 
   @Transform(({ value }) => (typeof value === 'string' ? value : ''))
   @IsString()
   @MaxLength(255)
   avatar: string;
+
+  @IsOptional()
+  @IsEnum(JoinPolicy)
+  joinPolicy?: JoinPolicy;
+
+  @IsOptional()
+  @IsEnum(PostPolicy)
+  postPolicy?: PostPolicy;
+
+  @IsOptional()
+  @IsEnum(Visibility)
+  visibility?: Visibility;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value : ''))
+  @IsString()
+  @MaxLength(255)
+  description?: string;
 }
 
 export class UpdateGroupDto {
@@ -159,7 +227,7 @@ export class UpdateGroupDto {
   name?: string;
 
   @IsOptional()
-  @IsIn(['public', 'private'])
+  @IsEnum(GroupType)
   type?: string;
 
   @IsOptional()
@@ -171,6 +239,24 @@ export class UpdateGroupDto {
   @Type(() => Number)
   @IsInt()
   sortOrder?: number;
+
+  @IsOptional()
+  @IsEnum(JoinPolicy)
+  joinPolicy?: JoinPolicy;
+
+  @IsOptional()
+  @IsEnum(PostPolicy)
+  postPolicy?: PostPolicy;
+
+  @IsOptional()
+  @IsEnum(Visibility)
+  visibility?: Visibility;
+
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value : ''))
+  @IsString()
+  @MaxLength(255)
+  description?: string;
 }
 
 export class MuteUserDto {
@@ -224,6 +310,14 @@ export class ChatSettingsDto {
   imageEnabled?: boolean;
 
   @IsOptional()
+  @IsBoolean()
+  voiceEnabled?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  dmEnabled?: boolean;
+
+  @IsOptional()
   @IsString()
   @MaxLength(4000)
   badWords?: string;
@@ -239,4 +333,60 @@ export class PageQueryDto {
   @IsInt()
   @Min(1)
   take: number;
+}
+
+export class JoinDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  groupId: number;
+}
+
+export class DiscoverQueryDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  cursor?: string;
+
+  @Transform(({ value }) => (value === undefined || value === null ? 20 : Number(value)))
+  @IsInt()
+  @Min(1)
+  limit: number;
+}
+
+export class DmOpenDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(32)
+  userId: string;
+}
+
+export class DeliveredDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  groupId: number;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  messageId: number;
+}
+
+export class UserDmQueryDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  cursor?: string;
+}
+
+export class AdminDmQueryDto {
+  @IsOptional()
+  @IsEnum(DmScope)
+  scope?: DmScope;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  cursor?: string;
 }

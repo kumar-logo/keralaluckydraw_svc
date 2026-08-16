@@ -76,6 +76,7 @@ export class LuckySpinService {
       freeCount: Math.max(0, maxFreeSpins - freeSpinsUsed),
       gameID: game.id,
       image: game.iconUrl ?? '',
+      banner: game.bannerUrl ?? '',
       isClose: false,
       itemCount: wheelConfig ? wheelConfig.itemCount : DEFAULT_WHEEL_ITEM_COUNT,
       multipleCount: wheelConfig
