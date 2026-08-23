@@ -1621,5 +1621,25 @@ PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 --   SELECT id, name, post_policy FROM chat_group;
 
 -- =============================================================================
+-- §48  PAYMENT GATEWAY: UPI ID for manual gateways (2026-08-23)
+-- -----------------------------------------------------------------------------
+-- payment_gateways gains upi_id. Admins set it per gateway; the user recharge
+-- screen shows it with a copy button, and it is returned to users for
+-- manual-mode gateways only. Mirrors migration 1741390000000. Idempotent.
+-- =============================================================================
+
+SET @has_upi := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'payment_gateways'
+    AND COLUMN_NAME = 'upi_id');
+SET @sql := IF(@has_upi = 0,
+  'ALTER TABLE `payment_gateways` ADD COLUMN `upi_id` VARCHAR(100) NOT NULL DEFAULT '''' AFTER `qr_image_url`',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- Verify:
+--   SHOW COLUMNS FROM payment_gateways LIKE 'upi_id';
+--   SELECT id, gateway_name, mode, upi_id FROM payment_gateways;
+
+-- =============================================================================
 -- END OF live-db-update.sql
 -- =============================================================================

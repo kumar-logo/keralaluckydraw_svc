@@ -41,6 +41,16 @@ export interface ChatMentionBadgePayload {
   groupId: number;
 }
 
+export interface ChatMuteStatePayload {
+  muted: boolean;
+  mutedUntil: string | null;
+  reason: string;
+}
+
+export enum ChatEvent {
+  MuteState = 'chat:mute_state',
+}
+
 export type ChatEventPayload =
   | ChatDeliveredPayload
   | ChatGroupUpdatePayload
@@ -48,4 +58,5 @@ export type ChatEventPayload =
   | ChatLeftPayload
   | ChatDmCreatedPayload
   | ChatDmClaimedPayload
-  | ChatMentionBadgePayload;
+  | ChatMentionBadgePayload
+  | ChatMuteStatePayload;

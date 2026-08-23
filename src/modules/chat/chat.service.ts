@@ -36,6 +36,8 @@ import {
   ChatDmCreatedPayload,
   ChatDmClaimedPayload,
   ChatMentionBadgePayload,
+  ChatMuteStatePayload,
+  ChatEvent,
 } from './chat.events';
 
 const ADMIN_LIST_MAX = 200;
@@ -48,6 +50,14 @@ const DISCOVER_MAX = 30;
 const DM_LIST_MAX = 30;
 const MENTIONS_LIST_CAP = 50;
 const SUPPORT_PEER_NAME = 'Support';
+
+export const CHAT_MUTED_MESSAGE = 'You are muted in the chat';
+
+const unmutedState = (): ChatMuteStatePayload => ({
+  muted: false,
+  mutedUntil: null,
+  reason: '',
+});
 
 interface Sender {
   userId: string;
@@ -258,11 +268,30 @@ export class ChatService {
     return { groups, memberOf };
   }
 
-  async isMuted(userId: string): Promise<boolean> {
+  private muteView(row: ChatMute | null): ChatMuteStatePayload {
+    if (row === null) return unmutedState();
+    if (row.mutedUntil === null) {
+      return { muted: true, mutedUntil: null, reason: row.reason };
+    }
+    const until = new Date(row.mutedUntil);
+    if (until.getTime() <= Date.now()) return unmutedState();
+    return { muted: true, mutedUntil: until.toISOString(), reason: row.reason };
+  }
+
+  async getMuteState(userId: string): Promise<ChatMuteStatePayload> {
     const row = await this.muteRepo.findOne({ where: { userId } });
-    if (!row) return false;
-    if (row.mutedUntil === null) return true;
-    return new Date(row.mutedUntil).getTime() > Date.now();
+    return this.muteView(row);
+  }
+
+  async isMuted(userId: string): Promise<boolean> {
+    const state = await this.getMuteState(userId);
+    return state.muted;
+  }
+
+  async assertNotMuted(userId: string): Promise<void> {
+    if (await this.isMuted(userId)) {
+      throw new ForbiddenException(CHAT_MUTED_MESSAGE);
+    }
   }
 
   private emit(
@@ -369,6 +398,7 @@ export class ChatService {
 
   async listGroupsForUser(userId: string) {
     const { groups, memberOf } = await this.loadVisible(userId);
+    const mute = await this.getMuteState(userId);
     const reads = await this.readRepo.find({ where: { userId } });
     const readMap = new Map(
       reads.map((r) => [
@@ -379,7 +409,7 @@ export class ChatService {
     const lastMap = await this.lastMessageMap(
       groups.map((g) => Number(g.lastMessageId)),
     );
-    return Promise.all(
+    const items = await Promise.all(
       groups.map(async (g) => {
         const entry = readMap.get(g.id);
         const lastRead = entry === undefined ? 0 : entry.lastRead;
@@ -410,6 +440,7 @@ export class ChatService {
         };
       }),
     );
+    return { groups: items, mute };
   }
 
   private async countUnread(groupId: number, afterId: number): Promise<number> {
@@ -729,9 +760,7 @@ export class ChatService {
     if (group.postPolicy === PostPolicy.AdminOnly) {
       throw new ForbiddenException('Only admins can post in this group');
     }
-    if (await this.isMuted(userId)) {
-      throw new ForbiddenException('You are muted in the chat');
-    }
+    await this.assertNotMuted(userId);
     const content = filterChatContent(input.content, {
       blockLinks: settings.blockLinks,
       badWords: parseBadWords(settings.badWords),
@@ -956,11 +985,18 @@ export class ChatService {
         }),
       );
     }
+    const payload: ChatMuteStatePayload = {
+      muted: true,
+      mutedUntil: mutedUntil === null ? null : mutedUntil.toISOString(),
+      reason,
+    };
+    this.wsGateway.sendToUser(userId, ChatEvent.MuteState, payload);
     return { success: true };
   }
 
   async unmuteUser(userId: string) {
     await this.muteRepo.delete({ userId });
+    this.wsGateway.sendToUser(userId, ChatEvent.MuteState, unmutedState());
     return { success: true };
   }
 

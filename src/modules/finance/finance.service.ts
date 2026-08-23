@@ -109,6 +109,7 @@ export class FinanceService {
       icon: gateway.iconUrl,
       mode: gateway.mode,
       qr: gateway.qrImageUrl,
+      upiId: gateway.mode === PaymentGatewayMode.Manual ? gateway.upiId : '',
       requireProof: Number(gateway.requireProof) === 1,
       minAmount: Number(gateway.minAmount),
       maxAmount: Number(gateway.maxAmount),

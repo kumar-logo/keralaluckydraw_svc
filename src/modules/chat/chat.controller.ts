@@ -8,6 +8,7 @@ import {
   Get,
   Query,
   BadRequestException,
+  ForbiddenException,
   UseInterceptors,
   UploadedFile,
 } from '@nestjs/common';
@@ -19,7 +20,7 @@ import {
   CHAT_SEND_LIMIT,
   CHAT_UPLOAD_LIMIT,
 } from '../../common/throttle/throttle.config';
-import { ChatService } from './chat.service';
+import { ChatService, CHAT_MUTED_MESSAGE } from './chat.service';
 import {
   chatUploadOptions,
   chatVoiceUploadOptions,
@@ -143,12 +144,19 @@ export class ChatController {
   @HttpCode(200)
   @Post('upload')
   @UseInterceptors(FileInterceptor('file', chatUploadOptions))
-  async upload(@UploadedFile() file: Express.Multer.File) {
+  async upload(
+    @CurrentUser('userId') userId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
     if (!file) throw new BadRequestException('No file uploaded');
     const settings = await this.chatService.getChatSettings();
     if (!settings.enabled || !settings.imageEnabled) {
       await removeChatUpload(file.path);
       throw new BadRequestException('Image sharing is disabled');
+    }
+    if (await this.chatService.isMuted(userId)) {
+      await removeChatUpload(file.path);
+      throw new ForbiddenException(CHAT_MUTED_MESSAGE);
     }
     return { url: chatImageUrl(file) };
   }
@@ -157,12 +165,19 @@ export class ChatController {
   @HttpCode(200)
   @Post('voice')
   @UseInterceptors(FileInterceptor('file', chatVoiceUploadOptions))
-  async voice(@UploadedFile() file: Express.Multer.File) {
+  async voice(
+    @CurrentUser('userId') userId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
     if (!file) throw new BadRequestException('No file uploaded');
     const settings = await this.chatService.getChatSettings();
     if (!settings.enabled || !settings.voiceEnabled) {
       await removeChatUpload(file.path);
       throw new BadRequestException('Voice messages are disabled');
+    }
+    if (await this.chatService.isMuted(userId)) {
+      await removeChatUpload(file.path);
+      throw new ForbiddenException(CHAT_MUTED_MESSAGE);
     }
     return { url: chatAudioUrl(file) };
   }

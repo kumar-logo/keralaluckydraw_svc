@@ -95,6 +95,9 @@ export class PaymentGateway {
   @Column({ name: 'qr_image_url', type: 'varchar', length: 500, default: '' })
   qrImageUrl: string;
 
+  @Column({ name: 'upi_id', type: 'varchar', length: 100, default: '' })
+  upiId: string;
+
   @Column({ name: 'sort_order', type: 'int', nullable: true, default: 0 })
   sortOrder: number;
 
