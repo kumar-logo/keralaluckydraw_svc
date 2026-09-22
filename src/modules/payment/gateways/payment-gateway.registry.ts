@@ -6,6 +6,7 @@ import {
   IWebhookGateway,
 } from './payment-gateway.interface';
 import { YpaymentGateway } from './ypayment.gateway';
+import { PayIndiaGateway } from './payindia.gateway';
 import { CashfreeGateway } from './cashfree.gateway';
 import { RazorpayGateway } from './razorpay.gateway';
 import { ManualGateway } from './manual.gateway';
@@ -16,12 +17,14 @@ export class PaymentGatewayRegistry {
 
   constructor(
     private readonly ypaymentGateway: YpaymentGateway,
+    private readonly payIndiaGateway: PayIndiaGateway,
     private readonly cashfreeGateway: CashfreeGateway,
     private readonly razorpayGateway: RazorpayGateway,
     private readonly manualGateway: ManualGateway,
   ) {
     this.gateways = new Map<PaymentGatewayCode, IPaymentGateway>([
       [PaymentGatewayCode.Ypayment, this.ypaymentGateway],
+      [PaymentGatewayCode.PayIndia, this.payIndiaGateway],
       [PaymentGatewayCode.Cashfree, this.cashfreeGateway],
       [PaymentGatewayCode.Razorpay, this.razorpayGateway],
       [PaymentGatewayCode.Manual, this.manualGateway],
@@ -36,6 +39,8 @@ export class PaymentGatewayRegistry {
         return PaymentGatewayCode.Razorpay;
       case PaymentGatewayCode.Ypayment:
         return PaymentGatewayCode.Ypayment;
+      case PaymentGatewayCode.PayIndia:
+        return PaymentGatewayCode.PayIndia;
       default:
         return PaymentGatewayCode.Manual;
     }

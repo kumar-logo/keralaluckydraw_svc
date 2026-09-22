@@ -7,11 +7,13 @@ import { Transaction } from '../../entities/transaction.entity';
 import { PaymentGateway } from '../../entities/payment-gateway.entity';
 import { CommissionConfig } from '../../entities/commission-config.entity';
 import { YpaymentGateway } from './gateways/ypayment.gateway';
+import { PayIndiaGateway } from './gateways/payindia.gateway';
 import { CashfreeGateway } from './gateways/cashfree.gateway';
 import { RazorpayGateway } from './gateways/razorpay.gateway';
 import { ManualGateway } from './gateways/manual.gateway';
 import { PaymentGatewayRegistry } from './gateways/payment-gateway.registry';
 import { YpaymentController } from './ypayment.controller';
+import { PayIndiaController } from './payindia.controller';
 import { CashfreeController } from './cashfree.controller';
 import { RazorpayController } from './razorpay.controller';
 
@@ -25,10 +27,16 @@ import { RazorpayController } from './razorpay.controller';
       CommissionConfig,
     ]),
   ],
-  controllers: [YpaymentController, CashfreeController, RazorpayController],
+  controllers: [
+    YpaymentController,
+    PayIndiaController,
+    CashfreeController,
+    RazorpayController,
+  ],
   providers: [
     PaymentService,
     YpaymentGateway,
+    PayIndiaGateway,
     CashfreeGateway,
     RazorpayGateway,
     ManualGateway,
