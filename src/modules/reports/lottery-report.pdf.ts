@@ -210,6 +210,11 @@ export function buildProfitLossPdf(report: ProfitLossReport): Promise<Buffer> {
         margin: [0, 0, 0, 8],
       },
       {
+        text: report.scopeLabel,
+        bold: true,
+        margin: [0, 0, 0, 4],
+      },
+      {
         text: `Date: ${report.generatedAt.split(' ')[0]} | Time: ${report.generatedAt.split(' ').slice(1).join(' ')}`,
         margin: [0, 0, 0, 4],
       },
@@ -371,6 +376,12 @@ export function buildNumberWisePdf(report: NumberWiseReport): Promise<Buffer> {
       },
       {
         text: `Lot: ${report.gameName}`,
+        alignment: 'center',
+        margin: [0, 0, 0, 2],
+      },
+      {
+        text: report.scopeLabel,
+        bold: true,
         alignment: 'center',
         margin: [0, 0, 0, 2],
       },

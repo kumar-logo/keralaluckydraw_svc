@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
@@ -6,15 +6,24 @@ import { LotterySalesRollup } from '../../entities/lottery-sales-rollup.entity';
 import { GameList } from '../../entities/game-list.entity';
 import { GameRound } from '../../entities/game-round.entity';
 import { GameSlatTier } from '../../entities/game-slat-tier.entity';
-import { TinyFlag, CronJobName, OrderStatus } from '../../common/enums';
+import {
+  TinyFlag,
+  CronJobName,
+  OrderStatus,
+  RoundStatus,
+} from '../../common/enums';
 import { CronRunRecorderService } from '../cron/cron-run-recorder.service';
 
 export interface ReportFilter {
   gameId: number;
-  roundNo?: string | null;
+  roundId?: number | null;
   slot?: number | null;
-  slotTime?: string | null;
   digitLength?: number | null;
+  startDate?: string | null;
+  endDate?: string | null;
+}
+
+export interface ReportDateRange {
   startDate?: string | null;
   endDate?: string | null;
 }
@@ -35,11 +44,11 @@ export interface ManualLotteryDrawView {
   gameName: string;
   iconUrl: string | null;
   gameType: string;
-  roundNo: string;
-  phase: number;
+  firstDrawDay: string;
+  lastDrawDay: string;
+  drawCount: number;
   startDate: string | null;
-  drawDate: string | null;
-  status: number;
+  slotLabels: string[];
 }
 
 export interface ProfitLossRow {
@@ -56,6 +65,8 @@ export interface ProfitLossRow {
 export interface ProfitLossReport {
   pageTitle: string;
   gameName: string;
+  roundNo: string | null;
+  scopeLabel: string;
   generatedAt: string;
   rows: ProfitLossRow[];
   lotTotals: {
@@ -101,6 +112,8 @@ export interface NumberWiseSummaryRow {
 export interface NumberWiseReport {
   pageTitle: string;
   gameName: string;
+  roundNo: string | null;
+  scopeLabel: string;
   generatedAt: string;
   groups: NumberWiseGroup[];
   grandTotalQty: number;
@@ -157,6 +170,40 @@ interface SlatHeadlineRow {
   sortOrder: string;
 }
 
+interface ReportRoundRow {
+  roundId: string;
+  gameId: string;
+  roundNo: string;
+  drawDay: string;
+  slotTime: string;
+  createdAt: Date | string | null;
+}
+
+interface ResolvedRoundRow {
+  gameId: string;
+  roundNo: string;
+  drawDay: string | null;
+  slotTime: string | null;
+}
+
+interface ResolvedReportFilter {
+  gameId: number;
+  roundNo: string | null;
+  roundDrawDay: string | null;
+  roundSlotTime: string | null;
+  slot?: number | null;
+  digitLength?: number | null;
+  startDate?: string | null;
+  endDate?: string | null;
+}
+
+const ORDER_DRAW_DAY_SQL = 'COALESCE(DATE(gr.draw_time), DATE(o.created_at))';
+
+const REPORT_EXCLUDED_ORDER_STATUSES: readonly OrderStatus[] = [
+  OrderStatus.Cancelled,
+  OrderStatus.Refunded,
+];
+
 @Injectable()
 export class LotteryReportService {
   private readonly logger = new Logger(LotteryReportService.name);
@@ -180,84 +227,121 @@ export class LotteryReportService {
     return games.map((g) => ({ gameId: g.id, gameName: g.gameName }));
   }
 
-  async listManualLotteryDraws(range?: {
-    startDate?: string | null;
-    endDate?: string | null;
-  }): Promise<ManualLotteryDrawView[]> {
+  async listManualLotteryDraws(
+    range?: ReportDateRange,
+  ): Promise<ManualLotteryDrawView[]> {
     const games = await this.gameRepo.find({
       where: { isLottery: TinyFlag.Yes, autoGenerate: TinyFlag.No },
       order: { sortOrder: 'ASC', gameName: 'ASC' },
     });
-    const startMs = this.dayStartMs(range?.startDate);
-    const endMs = this.dayEndMs(range?.endDate);
+    if (games.length === 0) return [];
+    const gameIds = games.map((game) => game.id);
+    const rounds = await this.queryReportRounds(gameIds, range);
+
+    const roundsByGame = new Map<number, ReportRoundRow[]>();
+    for (const round of rounds) {
+      const gameId = Number(round.gameId);
+      const bucket = roundsByGame.get(gameId);
+      if (bucket) bucket.push(round);
+      else roundsByGame.set(gameId, [round]);
+    }
+
     const out: ManualLotteryDrawView[] = [];
     for (const game of games) {
-      const rounds = await this.roundRepo.find({
-        where: { gameId: game.id },
-        order: { drawTime: 'ASC', id: 'ASC' },
-      });
-      rounds.forEach((round, index) => {
-        const drawMs = round.drawTime
-          ? new Date(round.drawTime).getTime()
-          : NaN;
-        if (startMs !== null && !(drawMs >= startMs)) return;
-        if (endMs !== null && !(drawMs <= endMs)) return;
-        out.push({
-          gameId: game.id,
-          gameName: game.gameName,
-          iconUrl: game.iconUrl ?? null,
-          gameType: game.gameType,
-          roundNo: round.roundNo,
-          phase: index + 1,
-          startDate: this.toIsoOrNull(round.createdAt),
-          drawDate: this.toIsoOrNull(round.drawTime),
-          status: round.status,
-        });
+      const gameRounds = roundsByGame.get(game.id);
+      if (!gameRounds || gameRounds.length === 0) continue;
+      out.push({
+        gameId: game.id,
+        gameName: game.gameName,
+        iconUrl: game.iconUrl ?? null,
+        gameType: game.gameType,
+        firstDrawDay: gameRounds[0].drawDay,
+        lastDrawDay: gameRounds[gameRounds.length - 1].drawDay,
+        drawCount: gameRounds.length,
+        startDate: this.earliestIso(gameRounds.map((r) => r.createdAt)),
+        slotLabels: this.toRoundSlots(gameRounds).map((slot) => slot.label),
       });
     }
-    return out.sort((a, b) => {
-      const aDraw = a.drawDate ?? '';
-      const bDraw = b.drawDate ?? '';
-      if (aDraw !== bDraw) return bDraw.localeCompare(aDraw);
-      return a.gameName.localeCompare(b.gameName);
+    return out;
+  }
+
+  private async queryReportRounds(
+    gameIds: number[],
+    range?: ReportDateRange,
+  ): Promise<ReportRoundRow[]> {
+    const qb = this.roundRepo
+      .createQueryBuilder('gr')
+      .select('gr.id', 'roundId')
+      .addSelect('gr.game_id', 'gameId')
+      .addSelect('gr.round_no', 'roundNo')
+      .addSelect("DATE_FORMAT(gr.draw_time, '%Y-%m-%d')", 'drawDay')
+      .addSelect("TIME_FORMAT(gr.draw_time, '%H:%i')", 'slotTime')
+      .addSelect('gr.created_at', 'createdAt')
+      .where('gr.game_id IN (:...gameIds)', { gameIds })
+      .andWhere('gr.draw_time IS NOT NULL')
+      .andWhere('gr.status <> :cancelled', {
+        cancelled: RoundStatus.Cancelled,
+      });
+    if (range?.startDate) {
+      qb.andWhere('DATE(gr.draw_time) >= :startDate', {
+        startDate: range.startDate,
+      });
+    }
+    if (range?.endDate) {
+      qb.andWhere('DATE(gr.draw_time) <= :endDate', {
+        endDate: range.endDate,
+      });
+    }
+    return qb
+      .orderBy('gr.draw_time', 'ASC')
+      .addOrderBy('gr.id', 'ASC')
+      .getRawMany<ReportRoundRow>();
+  }
+
+  private toRoundSlots(rounds: ReportRoundRow[]): DrawSlotView[] {
+    const multiDay = new Set(rounds.map((r) => r.drawDay)).size > 1;
+    const baseLabels = rounds.map((round) => {
+      const time = this.labelFromHHMM(round.slotTime);
+      return multiDay ? `${this.formatSqlDate(round.drawDay)} ${time}` : time;
+    });
+    const labelCount = new Map<string, number>();
+    for (const label of baseLabels) {
+      labelCount.set(label, (labelCount.get(label) ?? 0) + 1);
+    }
+    return rounds.map((round, index) => {
+      const base = baseLabels[index];
+      return {
+        value: String(round.roundId),
+        label:
+          (labelCount.get(base) ?? 0) > 1 ? `${base} #${round.roundNo}` : base,
+      };
     });
   }
 
-  private dayStartMs(date: string | null | undefined): number | null {
-    if (!date) return null;
-    const ms = new Date(`${date}T00:00:00`).getTime();
-    return isNaN(ms) ? null : ms;
+  private earliestIso(values: (Date | string | null)[]): string | null {
+    let earliest: number | null = null;
+    for (const value of values) {
+      if (value === null) continue;
+      const ms = (value instanceof Date ? value : new Date(value)).getTime();
+      if (isNaN(ms)) continue;
+      if (earliest === null || ms < earliest) earliest = ms;
+    }
+    return earliest === null ? null : new Date(earliest).toISOString();
   }
 
-  private dayEndMs(date: string | null | undefined): number | null {
-    if (!date) return null;
-    const ms = new Date(`${date}T23:59:59.999`).getTime();
-    return isNaN(ms) ? null : ms;
-  }
-
-  private toIsoOrNull(value: Date | null | undefined): string | null {
-    if (!value) return null;
-    const date = value instanceof Date ? value : new Date(value);
-    return isNaN(date.getTime()) ? null : date.toISOString();
-  }
-
-  async listSlots(gameId: number): Promise<SlotListView> {
+  async listSlots(
+    gameId: number,
+    range?: ReportDateRange,
+  ): Promise<SlotListView> {
     const game = await this.gameRepo.findOne({ where: { id: gameId } });
     const isManual =
       game?.isLottery === TinyFlag.Yes && game?.autoGenerate === TinyFlag.No;
     const digitLengths = await this.listDigitLengths(gameId);
     if (!isManual) return { isMultiDraw: false, drawSlots: [], digitLengths };
 
-    const configSlots = await this.configDrawSlots(gameId);
-    const dataSlots = await this.dataDrawSlots(gameId);
-    const byValue = new Map<string, DrawSlotView>();
-    for (const slot of [...configSlots, ...dataSlots]) {
-      if (!byValue.has(slot.value)) byValue.set(slot.value, slot);
-    }
-    const drawSlots = [...byValue.values()].sort((a, b) =>
-      a.value.localeCompare(b.value),
-    );
-    return { isMultiDraw: configSlots.length > 1, drawSlots, digitLengths };
+    const rounds = await this.queryReportRounds([gameId], range);
+    const drawSlots = this.toRoundSlots(rounds);
+    return { isMultiDraw: drawSlots.length > 1, drawSlots, digitLengths };
   }
 
   private async listDigitLengths(gameId: number): Promise<DrawSlotView[]> {
@@ -280,36 +364,6 @@ export class LotteryReportService {
       : `${len}-Digit`;
   }
 
-  private async configDrawSlots(gameId: number): Promise<DrawSlotView[]> {
-    const rows = await this.roundRepo
-      .createQueryBuilder('gr')
-      .select("DISTINCT TIME_FORMAT(gr.draw_time, '%H:%i')", 'slotTime')
-      .where('gr.game_id = :gameId', { gameId })
-      .andWhere('gr.draw_time IS NOT NULL')
-      .orderBy('slotTime', 'ASC')
-      .getRawMany();
-    return rows
-      .filter((r) => r.slotTime)
-      .map((r) => ({
-        value: r.slotTime,
-        label: this.labelFromHHMM(r.slotTime),
-      }));
-  }
-
-  private async dataDrawSlots(gameId: number): Promise<DrawSlotView[]> {
-    const rows = await this.rollupRepo
-      .createQueryBuilder('r')
-      .select('DISTINCT r.slot_time', 'slotTime')
-      .where('r.game_id = :gameId', { gameId })
-      .andWhere("r.slot_time <> ''")
-      .orderBy('slotTime', 'ASC')
-      .getRawMany();
-    return rows.map((r) => ({
-      value: r.slotTime,
-      label: this.labelFromHHMM(r.slotTime),
-    }));
-  }
-
   private labelFromHHMM(hhmm: string): string {
     const [hStr, mStr] = hhmm.split(':');
     const h = Number(hStr);
@@ -323,7 +377,7 @@ export class LotteryReportService {
     return `${dh}:${String(dm).padStart(2, '0')} ${ampm}`;
   }
 
-  private buildQuery(filter: ReportFilter) {
+  private buildQuery(filter: ResolvedReportFilter) {
     const qb = this.rollupRepo
       .createQueryBuilder('r')
       .where('r.game_id = :gameId', { gameId: filter.gameId });
@@ -331,8 +385,6 @@ export class LotteryReportService {
       qb.andWhere('r.round_no = :roundNo', { roundNo: filter.roundNo });
     if (filter.slot != null && !isNaN(filter.slot))
       qb.andWhere('r.slot = :slot', { slot: filter.slot });
-    if (filter.slotTime)
-      qb.andWhere('r.slot_time = :slotTime', { slotTime: filter.slotTime });
     if (filter.digitLength != null && !isNaN(filter.digitLength))
       qb.andWhere('CHAR_LENGTH(r.number) = :digitLength', {
         digitLength: filter.digitLength,
@@ -360,9 +412,72 @@ export class LotteryReportService {
     return game ? game.gameName : `Game ${gameId}`;
   }
 
-  async getProfitLoss(filter: ReportFilter): Promise<ProfitLossReport> {
+  private async resolveFilter(
+    filter: ReportFilter,
+  ): Promise<ResolvedReportFilter> {
+    const base: ResolvedReportFilter = {
+      gameId: filter.gameId,
+      roundNo: null,
+      roundDrawDay: null,
+      roundSlotTime: null,
+      slot: filter.slot,
+      digitLength: filter.digitLength,
+      startDate: filter.startDate,
+      endDate: filter.endDate,
+    };
+    if (filter.roundId == null || isNaN(filter.roundId)) return base;
+    const round = await this.roundRepo
+      .createQueryBuilder('gr')
+      .select('gr.game_id', 'gameId')
+      .addSelect('gr.round_no', 'roundNo')
+      .addSelect("DATE_FORMAT(gr.draw_time, '%Y-%m-%d')", 'drawDay')
+      .addSelect("TIME_FORMAT(gr.draw_time, '%H:%i')", 'slotTime')
+      .where('gr.id = :roundId', { roundId: filter.roundId })
+      .getRawOne<ResolvedRoundRow>();
+    if (!round || Number(round.gameId) !== filter.gameId) {
+      throw new NotFoundException('Round not found for this lottery');
+    }
+    return {
+      ...base,
+      roundNo: round.roundNo,
+      roundDrawDay: round.drawDay,
+      roundSlotTime: round.slotTime,
+    };
+  }
+
+  private scopeLabel(filter: ResolvedReportFilter): string {
+    const parts: string[] = [];
+    if (filter.roundNo) {
+      parts.push(`Round: ${filter.roundNo}`);
+      if (filter.roundDrawDay && filter.roundSlotTime) {
+        parts.push(
+          `Draw: ${this.formatSqlDate(filter.roundDrawDay)} ${this.labelFromHHMM(filter.roundSlotTime)}`,
+        );
+      }
+    } else if (filter.startDate && filter.endDate) {
+      parts.push(
+        filter.startDate === filter.endDate
+          ? `Draw Date: ${this.formatSqlDate(filter.startDate)}`
+          : `Draw Date: ${this.formatSqlDate(filter.startDate)} - ${this.formatSqlDate(filter.endDate)}`,
+      );
+    } else if (filter.startDate) {
+      parts.push(`Draw Date: from ${this.formatSqlDate(filter.startDate)}`);
+    } else if (filter.endDate) {
+      parts.push(`Draw Date: until ${this.formatSqlDate(filter.endDate)}`);
+    } else {
+      parts.push('All Draws');
+    }
+    if (filter.digitLength != null && !isNaN(filter.digitLength)) {
+      parts.push(`Digits: ${this.lenLabel(filter.digitLength)}`);
+    }
+    return parts.join(' | ');
+  }
+
+  async getProfitLoss(input: ReportFilter): Promise<ProfitLossReport> {
+    const filter = await this.resolveFilter(input);
     await this.refreshRollupForFilter(filter);
     const gameName = await this.gameName(filter.gameId);
+    const scopeLabel = this.scopeLabel(filter);
     const agg = await this.buildQuery(filter)
       .select('r.position', 'position')
       .addSelect('CHAR_LENGTH(r.number)', 'posLen')
@@ -457,6 +572,8 @@ export class LotteryReportService {
     return {
       pageTitle: `${gameName} - Profit & Loss Report`,
       gameName,
+      roundNo: filter.roundNo,
+      scopeLabel,
       generatedAt: this.formatNow(),
       rows,
       lotTotals,
@@ -466,8 +583,10 @@ export class LotteryReportService {
     };
   }
 
-  async getNumberWise(filter: ReportFilter): Promise<NumberWiseReport> {
+  async getNumberWise(input: ReportFilter): Promise<NumberWiseReport> {
+    const filter = await this.resolveFilter(input);
     const gameName = await this.gameName(filter.gameId);
+    const scopeLabel = this.scopeLabel(filter);
     const slotByProduct = await this.buildSlatSlotIndex(filter.gameId);
     const rows = await this.queryNumberWiseRows(filter);
 
@@ -551,6 +670,8 @@ export class LotteryReportService {
     return {
       pageTitle: `${gameName} - Number Wise Sales Report`,
       gameName,
+      roundNo: filter.roundNo,
+      scopeLabel,
       generatedAt: this.formatNow(),
       groups,
       grandTotalQty: groups.reduce((s, g) => s + g.totalQty, 0),
@@ -595,12 +716,12 @@ export class LotteryReportService {
   }
 
   private async queryNumberWiseRows(
-    filter: ReportFilter,
+    filter: ResolvedReportFilter,
   ): Promise<SlatOrderAggRow[]> {
     const qb = this.dataSource
       .createQueryBuilder()
-      .select("DATE_FORMAT(o.created_at, '%Y-%m-%d')", 'drawDate')
-      .addSelect("TIME_FORMAT(gr.draw_time, '%H:%i')", 'slotTime')
+      .select(`DATE_FORMAT(${ORDER_DRAW_DAY_SQL}, '%Y-%m-%d')`, 'drawDate')
+      .addSelect("COALESCE(TIME_FORMAT(gr.draw_time, '%H:%i'), '')", 'slotTime')
       .addSelect('u.invite_code', 'inviteCode')
       .addSelect(
         "JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.betType'))",
@@ -625,7 +746,7 @@ export class LotteryReportService {
       .addSelect('COALESCE(SUM(o.quantity), 0)', 'qty')
       .addSelect('COALESCE(SUM(o.total_amount), 0)', 'ticketPrice')
       .from('orders', 'o')
-      .innerJoin(
+      .leftJoin(
         'game_rounds',
         'gr',
         'gr.game_id = o.game_id AND gr.round_no = o.round_no',
@@ -634,15 +755,12 @@ export class LotteryReportService {
       .where('o.game_id = :gameId', { gameId: filter.gameId })
       .andWhere("JSON_EXTRACT(o.bet_content, '$.slatProductId') IS NOT NULL")
       .andWhere("JSON_EXTRACT(o.bet_content, '$.winPrice') IS NOT NULL")
-      .andWhere('gr.draw_time IS NOT NULL');
+      .andWhere('o.status NOT IN (:...excludedStatuses)', {
+        excludedStatuses: REPORT_EXCLUDED_ORDER_STATUSES,
+      });
 
     if (filter.roundNo) {
       qb.andWhere('o.round_no = :roundNo', { roundNo: filter.roundNo });
-    }
-    if (filter.slotTime) {
-      qb.andWhere("TIME_FORMAT(gr.draw_time, '%H:%i') = :slotTime", {
-        slotTime: filter.slotTime,
-      });
     }
     if (filter.digitLength != null && !isNaN(filter.digitLength)) {
       qb.andWhere(
@@ -651,12 +769,12 @@ export class LotteryReportService {
       );
     }
     if (filter.startDate) {
-      qb.andWhere('DATE(o.created_at) >= :startDate', {
+      qb.andWhere(`${ORDER_DRAW_DAY_SQL} >= :startDate`, {
         startDate: filter.startDate,
       });
     }
     if (filter.endDate) {
-      qb.andWhere('DATE(o.created_at) <= :endDate', {
+      qb.andWhere(`${ORDER_DRAW_DAY_SQL} <= :endDate`, {
         endDate: filter.endDate,
       });
     }
@@ -698,7 +816,7 @@ export class LotteryReportService {
 
   async rebuildRollupForDate(gameId: number, date: string): Promise<void> {
     await this.rollupRepo.delete({ gameId, drawDate: date });
-    await this.insertRollup(gameId, 'AND DATE(o.created_at) = ?', [date]);
+    await this.insertRollup(gameId, `AND ${ORDER_DRAW_DAY_SQL} = ?`, [date]);
   }
 
   async rebuildRollupForRound(gameId: number, roundNo: string): Promise<void> {
@@ -706,7 +824,9 @@ export class LotteryReportService {
     await this.insertRollup(gameId, 'AND o.round_no = ?', [roundNo]);
   }
 
-  private async refreshRollupForFilter(filter: ReportFilter): Promise<void> {
+  private async refreshRollupForFilter(
+    filter: ResolvedReportFilter,
+  ): Promise<void> {
     if (filter.roundNo) {
       await this.rebuildRollupForRound(filter.gameId, filter.roundNo);
       return;
@@ -721,7 +841,7 @@ export class LotteryReportService {
     }
   }
 
-  private filterDates(filter: ReportFilter): string[] {
+  private filterDates(filter: ResolvedReportFilter): string[] {
     if (!filter.startDate) return [];
     let endDate = filter.startDate;
     if (filter.endDate) endDate = filter.endDate;
@@ -751,7 +871,7 @@ export class LotteryReportService {
         (game_id, draw_date, slot_time, round_no, slot, position, pos_len, number, price, win_price, sales_qty, draw_qty, draw_amount)
        SELECT
         o.game_id,
-        DATE(o.created_at) AS draw_date,
+        ${ORDER_DRAW_DAY_SQL} AS draw_date,
         COALESCE(TIME_FORMAT(gr.draw_time, '%H:%i'), '') AS slot_time,
         o.round_no AS round_no,
         CAST(JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.slot')) AS UNSIGNED) AS slot,
@@ -768,9 +888,9 @@ export class LotteryReportService {
          ON gr.game_id = o.game_id AND gr.round_no = o.round_no
        WHERE o.game_id = ?
          AND JSON_EXTRACT(o.bet_content, '$.slot') IS NOT NULL
-         AND o.status NOT IN (${OrderStatus.Cancelled}, ${OrderStatus.Refunded})
+         AND o.status NOT IN (${REPORT_EXCLUDED_ORDER_STATUSES.join(', ')})
          ${extraWhere}
-       GROUP BY o.game_id, DATE(o.created_at), slot_time, o.round_no, slot, position, number, o.amount, win_price`,
+       GROUP BY o.game_id, draw_date, slot_time, o.round_no, slot, position, number, o.amount, win_price`,
       [gameId, ...extraParams],
     );
   }

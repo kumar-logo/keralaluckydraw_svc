@@ -1641,5 +1641,49 @@ PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 --   SELECT id, gateway_name, mode, upi_id FROM payment_gateways;
 
 -- =============================================================================
+-- §49  PAYMENT GATEWAY: PayIndia activation row (2026-10-08)
+-- -----------------------------------------------------------------------------
+-- Adds the PayIndia UPI gateway (gateway_type 'payindia', served by the new
+-- PayIndiaGateway driver: create-order, check-status, signed webhook, and the
+-- recharge-reconcile cron) plus its 'upi' method chip. No schema change.
+-- The row is inserted DISABLED (status 0) with placeholder credentials. After
+-- running: open admin > Payment Gateways > PayIndia, paste the real API Key,
+-- API Secret and Webhook Secret from the PayIndia dashboard, then enable it.
+-- In the PayIndia Webhooks Portal register:
+--   https://api.keralaluckydraw.com/payment/webhook/payindia
+-- Never commit real keys into this file. Idempotent: inserts only when no row
+-- with provider_code 'payindia' exists; the method chip only when missing.
+-- =============================================================================
+
+INSERT INTO `payment_gateways`
+  (`gateway_name`, `provider_code`, `gateway_type`, `mode`, `api_url`,
+   `api_key`, `api_secret`, `callback_url`, `webhook_secret`, `min_amount`,
+   `max_amount`, `fee_rate`, `fee_fixed`, `icon_url`, `qr_image_url`, `upi_id`,
+   `sort_order`, `require_proof`, `additional_verification`, `manual_fallback`,
+   `status`)
+SELECT 'PayIndia', 'payindia', 'payindia', 'auto', 'https://online.axnbetz.com/api',
+       'REPLACE_WITH_X_API_KEY', 'REPLACE_WITH_X_API_SECRET',
+       'https://api.keralaluckydraw.com/payment/webhook/payindia',
+       'REPLACE_WITH_WEBHOOK_SECRET', 100.00, 50000.00, 0.0000, 0.00,
+       '', '', '', 5, 0, 0, 0, 0
+  FROM DUAL
+ WHERE NOT EXISTS (SELECT 1 FROM `payment_gateways`
+                    WHERE `provider_code` = 'payindia');
+
+INSERT INTO `payment_gateway_method` (`gateway_id`, `method_code`, `sort_order`)
+SELECT g.`id`, 'upi', 0
+  FROM `payment_gateways` g
+ WHERE g.`provider_code` = 'payindia'
+   AND NOT EXISTS (SELECT 1 FROM `payment_gateway_method` m
+                    WHERE m.`gateway_id` = g.`id` AND m.`method_code` = 'upi');
+
+-- Verify:
+--   SELECT id, gateway_name, provider_code, gateway_type, mode, status
+--     FROM payment_gateways WHERE provider_code = 'payindia';
+--   SELECT m.* FROM payment_gateway_method m
+--     JOIN payment_gateways g ON g.id = m.gateway_id
+--    WHERE g.provider_code = 'payindia';
+
+-- =============================================================================
 -- END OF live-db-update.sql
 -- =============================================================================

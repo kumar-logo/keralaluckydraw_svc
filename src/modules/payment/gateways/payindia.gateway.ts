@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, HttpStatus } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { createHmac, timingSafeEqual } from 'crypto';
@@ -20,16 +20,56 @@ export const PAYINDIA_RETURN_PATH = 'payment/return/payindia';
 export const PAYINDIA_WEBHOOK_PATH = 'payment/webhook/payindia';
 export const PAYINDIA_VERIFY_PATH = 'payment/verify/payindia';
 export const PAYINDIA_SIGNATURE_HEADER = 'x-payindia-signature';
+export const PAYINDIA_REQUEST_TIMEOUT_MS = 15000;
 
-enum PayIndiaResponseStatus {
-  Success = 'success',
+const PAYINDIA_AMOUNT_TOLERANCE = 0.01;
+const PAYINDIA_LOG_SNIPPET_LENGTH = 500;
+const PAYINDIA_REASON_FIELD_LENGTH = 40;
+const PAYINDIA_REASON_DETAIL_LENGTH = 100;
+const PAYINDIA_DEFAULT_FAILURE_MESSAGE = 'Payment gateway request failed';
+
+export enum PayIndiaEndpoint {
+  CreateOrder = 'create-order',
+  CheckStatus = 'check-status',
 }
 
-enum PayIndiaPaymentStatus {
+export enum PayIndiaResponseStatus {
+  Success = 'success',
+  Unknown = 'unknown',
+}
+
+export enum PayIndiaPaymentStatus {
   Success = 'success',
   Pending = 'pending',
   Failed = 'failed',
+  Failure = 'failure',
+  Cancelled = 'cancelled',
+  Canceled = 'canceled',
+  Expired = 'expired',
+  Declined = 'declined',
+  Rejected = 'rejected',
+  Unknown = 'unknown',
 }
+
+const PAYINDIA_DEFINITIVE_FAILURE_STATUSES: readonly PayIndiaPaymentStatus[] = [
+  PayIndiaPaymentStatus.Failed,
+  PayIndiaPaymentStatus.Failure,
+  PayIndiaPaymentStatus.Cancelled,
+  PayIndiaPaymentStatus.Canceled,
+  PayIndiaPaymentStatus.Expired,
+  PayIndiaPaymentStatus.Declined,
+  PayIndiaPaymentStatus.Rejected,
+];
+
+const PAYINDIA_AUTH_FAILURE_HTTP_STATUSES: readonly number[] = [
+  HttpStatus.UNAUTHORIZED,
+  HttpStatus.FORBIDDEN,
+];
+
+const PAYINDIA_TRANSIENT_HTTP_STATUSES: readonly number[] = [
+  HttpStatus.REQUEST_TIMEOUT,
+  HttpStatus.TOO_MANY_REQUESTS,
+];
 
 interface PayIndiaCreatePayload {
   amount: string;
@@ -45,24 +85,24 @@ interface PayIndiaCreateData {
 }
 
 interface PayIndiaCreateResponse {
-  status?: string;
+  status?: string | boolean | null;
   message?: string;
   error?: string;
-  data?: PayIndiaCreateData;
+  data?: PayIndiaCreateData | null;
 }
 
 interface PayIndiaStatusData {
   order_id?: string;
-  amount?: number | string;
-  payment_status?: string;
-  utr?: string;
+  amount?: number | string | null;
+  payment_status?: string | null;
+  utr?: string | number | null;
 }
 
 interface PayIndiaStatusResponse {
-  status?: string;
+  status?: string | boolean | null;
   message?: string;
   error?: string;
-  data?: PayIndiaStatusData;
+  data?: PayIndiaStatusData | null;
 }
 
 interface PayIndiaWebhookBody {
@@ -80,11 +120,15 @@ interface PayIndiaCredentials {
   apiSecret: string;
 }
 
+interface PayIndiaHttpResponse {
+  httpStatus: number;
+  raw: string;
+}
+
 interface PayIndiaClassification {
   status: WebhookStatus;
-  paymentStatus: string;
   amount: number;
-  expected: number;
+  reason: string;
 }
 
 @Injectable()
@@ -108,7 +152,9 @@ export class PayIndiaGateway
     userId: string,
     providerCode?: string,
   ): Promise<PaymentOrder> {
-    const credentials = await this.requireCredentials(providerCode);
+    const credentials = this.toCredentials(
+      await this.loadGatewayConfig(this.requireProviderCode(providerCode)),
+    );
 
     const user = await this.userRepo.findOne({ where: { userId } });
     if (!user) {
@@ -129,17 +175,28 @@ export class PayIndiaGateway
       payload.customer_mobile = user.phone;
     }
 
-    const raw = await this.request(credentials, 'create-order', payload);
-    const data = this.parseJson<PayIndiaCreateResponse>(raw, 'create-order');
+    const response = await this.request(
+      credentials,
+      PayIndiaEndpoint.CreateOrder,
+      payload,
+    );
+    const data = this.parseJson<PayIndiaCreateResponse>(
+      response.raw,
+      PayIndiaEndpoint.CreateOrder,
+    );
 
-    if (data.status !== PayIndiaResponseStatus.Success) {
-      this.logger.error(`PayIndia create-order rejected: ${raw.slice(0, 500)}`);
+    if (
+      this.normalizeEnvelope(data.status) !== PayIndiaResponseStatus.Success
+    ) {
+      this.logger.error(
+        `PayIndia create-order rejected (HTTP ${response.httpStatus}): ${this.snippet(response.raw)}`,
+      );
       throw new BadRequestException(this.describeFailure(data));
     }
     const payUrl = data.data?.payment_url;
-    if (payUrl === undefined || payUrl.trim() === '') {
+    if (typeof payUrl !== 'string' || payUrl.trim() === '') {
       this.logger.error(
-        `PayIndia create-order missing payment_url: ${raw.slice(0, 500)}`,
+        `PayIndia create-order missing payment_url: ${this.snippet(response.raw)}`,
       );
       throw new BadRequestException('Payment order creation failed');
     }
@@ -161,26 +218,51 @@ export class PayIndiaGateway
       throw new BadRequestException('Order not found');
     }
 
-    const credentials = await this.requireCredentials(providerCode);
-    const raw = await this.request(credentials, 'check-status', {
-      order_id: orderNo,
-    });
-    const data = this.parseJson<PayIndiaStatusResponse>(raw, 'check-status');
-
-    if (data.status !== PayIndiaResponseStatus.Success) {
-      this.logger.error(`PayIndia check-status rejected: ${raw.slice(0, 500)}`);
-      throw new BadRequestException(this.describeFailure(data));
+    const credentials = this.toCredentials(
+      await this.loadGatewayConfigAnyStatus(
+        this.requireProviderCode(providerCode),
+      ),
+    );
+    const response = await this.request(
+      credentials,
+      PayIndiaEndpoint.CheckStatus,
+      { order_id: orderNo },
+    );
+    const data = this.parseJson<PayIndiaStatusResponse>(
+      response.raw,
+      PayIndiaEndpoint.CheckStatus,
+    );
+    const envelope = this.normalizeEnvelope(data.status);
+    if (envelope === '' && typeof data.error !== 'string') {
+      this.logger.error(
+        `PayIndia check-status missing status envelope (HTTP ${response.httpStatus}): ${this.snippet(response.raw)}`,
+      );
+      throw new BadRequestException(
+        'Payment gateway returned an invalid response',
+      );
     }
-    if (data.data === undefined) {
+
+    if (envelope !== PayIndiaResponseStatus.Success) {
+      return this.buildResult(
+        orderNo,
+        credentials.row.providerCode,
+        this.classifyUnconfirmed(orderNo, response, envelope, data),
+        response.raw,
+        undefined,
+      );
+    }
+    if (data.data === undefined || data.data === null) {
+      this.logger.error(
+        `PayIndia check-status missing data: ${this.snippet(response.raw)}`,
+      );
       throw new BadRequestException('PayIndia status response missing data');
     }
 
-    const classification = this.classify(data.data, Number(record.amount));
     return this.buildResult(
       orderNo,
       credentials.row.providerCode,
-      classification,
-      raw,
+      this.classify(orderNo, data.data, Number(record.amount)),
+      response.raw,
       data.data.utr,
     );
   }
@@ -188,7 +270,7 @@ export class PayIndiaGateway
   async verifyWebhook(context: WebhookContext): Promise<WebhookResult> {
     const body = context.body as PayIndiaWebhookBody;
     const orderNo = body.order_id;
-    if (orderNo === undefined || orderNo.trim() === '') {
+    if (typeof orderNo !== 'string' || orderNo.trim() === '') {
       throw new BadRequestException('PayIndia webhook missing order_id');
     }
 
@@ -211,13 +293,14 @@ export class PayIndiaGateway
     return this.verifyPayment(orderNo, undefined, row.providerCode);
   }
 
-  private async requireCredentials(
-    providerCode?: string,
-  ): Promise<PayIndiaCredentials> {
+  private requireProviderCode(providerCode?: string): string {
     if (providerCode === undefined || providerCode.trim() === '') {
       throw new BadRequestException('PayIndia provider code missing');
     }
-    const row = await this.loadGatewayConfig(providerCode);
+    return providerCode;
+  }
+
+  private toCredentials(row: PaymentGateway | null): PayIndiaCredentials {
     if (!row) {
       throw new BadRequestException('PayIndia gateway not configured');
     }
@@ -240,9 +323,11 @@ export class PayIndiaGateway
 
   private async request(
     credentials: PayIndiaCredentials,
-    endpoint: string,
+    endpoint: PayIndiaEndpoint,
     payload: object,
-  ): Promise<string> {
+  ): Promise<PayIndiaHttpResponse> {
+    let httpStatus: number;
+    let raw: string;
     try {
       const response = await fetch(`${credentials.baseUrl}${endpoint}`, {
         method: 'POST',
@@ -252,37 +337,81 @@ export class PayIndiaGateway
           'X-API-Secret': credentials.apiSecret,
         },
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(PAYINDIA_REQUEST_TIMEOUT_MS),
       });
-      return await response.text();
+      httpStatus = response.status;
+      raw = await response.text();
     } catch (error) {
       this.logger.error(
         `PayIndia ${endpoint} request failed: ${(error as Error).message}`,
       );
       throw new BadRequestException('Payment gateway unavailable');
     }
+
+    if (PAYINDIA_AUTH_FAILURE_HTTP_STATUSES.includes(httpStatus)) {
+      this.logger.error(
+        `PayIndia ${endpoint} authentication rejected (HTTP ${httpStatus}): ${this.snippet(raw)}`,
+      );
+      throw new BadRequestException('Payment gateway authentication failed');
+    }
+    if (
+      PAYINDIA_TRANSIENT_HTTP_STATUSES.includes(httpStatus) ||
+      httpStatus >= HttpStatus.INTERNAL_SERVER_ERROR
+    ) {
+      this.logger.error(
+        `PayIndia ${endpoint} unavailable (HTTP ${httpStatus}): ${this.snippet(raw)}`,
+      );
+      throw new BadRequestException('Payment gateway unavailable');
+    }
+    return { httpStatus, raw };
   }
 
-  private parseJson<T>(raw: string, endpoint: string): T {
+  private parseJson<T extends object>(
+    raw: string,
+    endpoint: PayIndiaEndpoint,
+  ): T {
+    let parsed: unknown;
     try {
-      return JSON.parse(raw) as T;
+      parsed = JSON.parse(raw);
     } catch {
       this.logger.error(
-        `PayIndia ${endpoint} non-JSON response: ${raw.slice(0, 500)}`,
+        `PayIndia ${endpoint} non-JSON response: ${this.snippet(raw)}`,
       );
       throw new BadRequestException(
         'Payment gateway returned an invalid response',
       );
     }
+    if (typeof parsed !== 'object' || parsed === null) {
+      this.logger.error(
+        `PayIndia ${endpoint} non-object response: ${this.snippet(raw)}`,
+      );
+      throw new BadRequestException(
+        'Payment gateway returned an invalid response',
+      );
+    }
+    return parsed as T;
+  }
+
+  private normalizeEnvelope(
+    status: string | boolean | null | undefined,
+  ): string {
+    return status === undefined || status === null
+      ? ''
+      : String(status).trim().toLowerCase();
+  }
+
+  private snippet(raw: string): string {
+    return raw.slice(0, PAYINDIA_LOG_SNIPPET_LENGTH);
   }
 
   private describeFailure(data: { error?: string; message?: string }): string {
-    if (data.error !== undefined && data.error.trim() !== '') {
+    if (typeof data.error === 'string' && data.error.trim() !== '') {
       return data.error;
     }
-    if (data.message !== undefined && data.message.trim() !== '') {
+    if (typeof data.message === 'string' && data.message.trim() !== '') {
       return data.message;
     }
-    throw new BadRequestException('Payment gateway request failed');
+    return PAYINDIA_DEFAULT_FAILURE_MESSAGE;
   }
 
   private buildReturnUrl(row: PaymentGateway): string {
@@ -320,39 +449,65 @@ export class PayIndiaGateway
   }
 
   private classify(
+    orderNo: string,
     data: PayIndiaStatusData,
     expected: number,
   ): PayIndiaClassification {
-    const rawStatus = data.payment_status;
-    if (rawStatus === undefined || rawStatus.trim() === '') {
-      throw new BadRequestException(
-        'PayIndia status response missing payment_status',
-      );
-    }
-    const paymentStatus = rawStatus.toLowerCase();
+    const paymentStatus =
+      typeof data.payment_status === 'string' &&
+      data.payment_status.trim() !== ''
+        ? data.payment_status.trim().toLowerCase()
+        : PayIndiaPaymentStatus.Unknown;
+    const parsedAmount = Number(data.amount);
+    const amount = Number.isFinite(parsedAmount) ? parsedAmount : 0;
 
-    const amount = Number(data.amount);
-    if (!Number.isFinite(amount)) {
-      throw new BadRequestException('PayIndia status response missing amount');
-    }
+    const reportsSuccess = paymentStatus === PayIndiaPaymentStatus.Success;
+    const amountMatches =
+      Math.abs(amount - expected) < PAYINDIA_AMOUNT_TOLERANCE;
+    const isDefinitiveFailure = PAYINDIA_DEFINITIVE_FAILURE_STATUSES.includes(
+      paymentStatus as PayIndiaPaymentStatus,
+    );
 
     let status: WebhookStatus;
-    if (paymentStatus === PayIndiaPaymentStatus.Success) {
-      status =
-        Math.abs(amount - expected) < 0.01
-          ? WebhookStatus.Success
-          : WebhookStatus.Failed;
-    } else if (paymentStatus === PayIndiaPaymentStatus.Failed) {
+    if (reportsSuccess && amountMatches) {
+      status = WebhookStatus.Success;
+    } else if (reportsSuccess || isDefinitiveFailure) {
       status = WebhookStatus.Failed;
-    } else if (paymentStatus === PayIndiaPaymentStatus.Pending) {
-      status = WebhookStatus.Pending;
     } else {
-      throw new BadRequestException(
-        `PayIndia unknown payment_status: ${paymentStatus}`,
-      );
+      status = WebhookStatus.Pending;
+      if (paymentStatus !== PayIndiaPaymentStatus.Pending) {
+        this.logger.warn(
+          `PayIndia unrecognised payment_status "${paymentStatus}" for ${orderNo}; treating as pending`,
+        );
+      }
     }
 
-    return { status, paymentStatus, amount, expected };
+    return {
+      status,
+      amount,
+      reason:
+        status === WebhookStatus.Success
+          ? ''
+          : `paymentStatus=${paymentStatus.slice(0, PAYINDIA_REASON_FIELD_LENGTH)}; gatewayAmount=${amount}; expected=${expected}`,
+    };
+  }
+
+  private classifyUnconfirmed(
+    orderNo: string,
+    response: PayIndiaHttpResponse,
+    envelope: string,
+    data: PayIndiaStatusResponse,
+  ): PayIndiaClassification {
+    this.logger.warn(
+      `PayIndia check-status unconfirmed for ${orderNo} (HTTP ${response.httpStatus}): ${this.snippet(response.raw)}`,
+    );
+    const responseStatus =
+      envelope === '' ? PayIndiaResponseStatus.Unknown : envelope;
+    return {
+      status: WebhookStatus.Pending,
+      amount: 0,
+      reason: `checkStatus=${responseStatus.slice(0, PAYINDIA_REASON_FIELD_LENGTH)}; httpStatus=${response.httpStatus}; detail=${this.describeFailure(data).slice(0, PAYINDIA_REASON_DETAIL_LENGTH)}`,
+    };
   }
 
   private buildResult(
@@ -360,19 +515,18 @@ export class PayIndiaGateway
     providerCode: string,
     classification: PayIndiaClassification,
     rawData: string,
-    utr: string | undefined,
+    utr: string | number | null | undefined,
   ): WebhookResult {
+    const paymentRef =
+      utr === undefined || utr === null ? '' : String(utr).trim();
     return {
       orderNo,
       amount: classification.amount,
       status: classification.status,
       gatewayRef: `${providerCode}_${orderNo}`,
       rawData,
-      reason:
-        classification.status === WebhookStatus.Success
-          ? ''
-          : `paymentStatus=${classification.paymentStatus}; gatewayAmount=${classification.amount}; expected=${classification.expected}`,
-      paymentRef: utr === undefined || utr.trim() === '' ? undefined : utr,
+      reason: classification.reason,
+      paymentRef: paymentRef === '' ? undefined : paymentRef,
     };
   }
 }
