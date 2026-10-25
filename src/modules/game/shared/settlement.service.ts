@@ -1,12 +1,11 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, QueryRunner, Repository } from 'typeorm';
-import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { GameEngineService } from './game-engine.service';
 import { GameConfigService } from './game-config.service';
 import { ConfigLoaderService } from '../../config/config-loader.service';
 import { SpaWsService } from '../../websocket/spa-ws.service';
-import { OddsService } from './odds.service';
+import { MissingOddsPolicy, OddsService } from './odds.service';
 import { Order } from '../../../entities/order.entity';
 import { GameRound } from '../../../entities/game-round.entity';
 import { GameList } from '../../../entities/game-list.entity';
@@ -15,6 +14,7 @@ import { User } from '../../../entities/user.entity';
 import {
   GameMechanic,
   MechanicBetContent,
+  MechanicResult,
   betCodeOf,
 } from './mechanics/mechanic.types';
 import { GameMechanicsConfig } from './game-config.types';
@@ -37,7 +37,6 @@ interface EvaluationResult {
   won: boolean;
   winAmount: number;
   odds: number;
-  prizeLevel?: string;
   fixed?: boolean;
 }
 
@@ -117,11 +116,9 @@ export class SettlementService {
       let totalPayout = 0;
       let wonCount = 0;
       let lostCount = 0;
-      let totalBet = 0;
       const wonByUser = new Map<string, number>();
 
       for (const order of pendingOrders) {
-        totalBet += Number(order.totalAmount);
         const evaluation = await this.evaluateOrder(
           order,
           round.result,
@@ -139,28 +136,12 @@ export class SettlementService {
             : this.applyWinFee(evaluation.winAmount, winFee);
           totalPayout += netWin;
 
-          const update: QueryDeepPartialEntity<Order> = {
+          await queryRunner.manager.getRepository(Order).update(order.id, {
             status: 1,
             winAmount: netWin,
             odds: evaluation.odds,
             settledAt: new Date(),
-          };
-          if (evaluation.fixed) {
-            const existingBetContent =
-              order.betContent &&
-              typeof order.betContent === 'object' &&
-              !Array.isArray(order.betContent)
-                ? (order.betContent as Record<string, unknown>)
-                : {};
-            update.betContent = {
-              ...existingBetContent,
-              position: evaluation.prizeLevel,
-              winPrice: netWin,
-            };
-          }
-          await queryRunner.manager
-            .getRepository(Order)
-            .update(order.id, update);
+          });
 
           await this.gameEngine.creditBalance(
             order.userId,
@@ -281,12 +262,12 @@ export class SettlementService {
 
   private async evaluateOrder(
     order: Order,
-    result: any,
+    result: MechanicResult,
     mechanic: GameMechanic | undefined,
     cfg: GameMechanicsConfig,
     oddsMap: Record<string, number>,
     aliasMap: Record<string, string>,
-    missingPolicy: string,
+    missingPolicy: MissingOddsPolicy,
   ): Promise<EvaluationResult> {
     if (!mechanic) {
       this.logger.warn(
@@ -303,25 +284,12 @@ export class SettlementService {
     });
 
     if (!outcome.won) {
-      return {
-        won: false,
-        winAmount: 0,
-        odds: Number(order.odds),
-        prizeLevel: outcome.prizeLevel,
-      };
+      return { won: false, winAmount: 0, odds: Number(order.odds) };
     }
 
     if (outcome.fixedWin !== undefined) {
-      const winAmount = round2(
-        outcome.fixedWin * (Number(order.quantity) || 1),
-      );
-      return {
-        won: winAmount > 0,
-        winAmount,
-        odds: 0,
-        prizeLevel: outcome.prizeLevel,
-        fixed: true,
-      };
+      const winAmount = round2(outcome.fixedWin * Number(order.quantity));
+      return { won: winAmount > 0, winAmount, odds: 0, fixed: true };
     }
 
     const betCode = betCodeOf(
@@ -334,7 +302,7 @@ export class SettlementService {
       oddsKey: outcome.oddsKey,
       storedOdds: Number(order.odds),
       aliasMap,
-      missingPolicy: missingPolicy as any,
+      missingPolicy,
     });
     const odds = resolution.odds;
     if (resolution.source === 'missing') {
@@ -344,7 +312,7 @@ export class SettlementService {
     }
 
     const winAmount = Number((Number(order.totalAmount) * odds).toFixed(2));
-    return { won: true, winAmount, odds, prizeLevel: outcome.prizeLevel };
+    return { won: true, winAmount, odds };
   }
 
   private applyWinFee(grossWin: number, fee: GameFeeConfig | null): number {

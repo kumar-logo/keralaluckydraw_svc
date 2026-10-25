@@ -41,9 +41,16 @@ import {
   SlatTierView,
 } from './game-config.types';
 import { resolveFamily } from './mechanics/family-map';
-import { GameFamily, SlatMatchMode } from '../../../common/enums';
+import { GameFamily, OrderStatus, SlatMatchMode } from '../../../common/enums';
+import { slatBetTier } from './slat-reading.util';
 
 export type { SlatProductView, SlatTierView };
+
+interface PendingSlatTicketRow {
+  productId: string;
+  label: string;
+  positions: string;
+}
 
 export interface BoxItemView {
   itemID: number;
@@ -1047,27 +1054,49 @@ export class GameConfigService {
       const productRepo = manager.getRepository(GameSlatProduct);
       const tierRepo = manager.getRepository(GameSlatTier);
       const existing = await productRepo.find({ where: { gameId } });
-      if (existing.length > 0) {
-        await tierRepo.delete({ productId: In(existing.map((p) => p.id)) });
-        await productRepo.delete({ gameId });
+      const existingIds = new Set(existing.map((p) => p.id));
+      const keptIds = new Set<number>();
+      for (const product of products) {
+        if (product.id === undefined) continue;
+        if (!existingIds.has(product.id)) {
+          throw new BadRequestException(
+            `Slat product ${product.id} does not belong to game ${gameId}`,
+          );
+        }
+        keptIds.add(product.id);
+      }
+      await this.assertPendingSlatTicketsKept(manager, gameId, products);
+      const removedIds = existing
+        .map((p) => p.id)
+        .filter((id) => !keptIds.has(id));
+      if (removedIds.length > 0) {
+        await tierRepo.delete({ productId: In(removedIds) });
+        await productRepo.delete({ id: In(removedIds) });
       }
       for (let i = 0; i < products.length; i++) {
         const product = products[i];
-        const savedProduct = await productRepo.save(
-          productRepo.create({
-            gameId,
-            digitCount: gameDigitCount,
-            price: product.price,
-            matchMode: product.matchMode,
-            title: product.title,
-            status: product.status,
-            sortOrder: i,
-          }),
-        );
+        const fields = {
+          gameId,
+          digitCount: gameDigitCount,
+          price: product.price,
+          matchMode: product.matchMode,
+          title: product.title,
+          status: product.status,
+          sortOrder: i,
+        };
+        let productId: number;
+        if (product.id === undefined) {
+          const saved = await productRepo.save(productRepo.create(fields));
+          productId = saved.id;
+        } else {
+          await productRepo.update(product.id, fields);
+          productId = product.id;
+        }
+        await tierRepo.delete({ productId });
         await tierRepo.save(
           product.tiers.map((tier, tierIndex) =>
             tierRepo.create({
-              productId: savedProduct.id,
+              productId,
               label: tier.label,
               memberPositions: tier.positions.join(','),
               winAmount: tier.winAmount,
@@ -1078,6 +1107,40 @@ export class GameConfigService {
         );
       }
     });
+  }
+
+  private async assertPendingSlatTicketsKept(
+    manager: EntityManager,
+    gameId: number,
+    products: SlatProductView[],
+  ): Promise<void> {
+    const rows = await manager
+      .createQueryBuilder()
+      .select(
+        "JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.slatProductId'))",
+        'productId',
+      )
+      .addSelect('o.bet_type', 'label')
+      .addSelect("JSON_EXTRACT(o.bet_content, '$.positions')", 'positions')
+      .from('orders', 'o')
+      .where('o.game_id = :gameId', { gameId })
+      .andWhere('o.status = :pending', { pending: OrderStatus.Pending })
+      .andWhere("JSON_EXTRACT(o.bet_content, '$.slatProductId') IS NOT NULL")
+      .groupBy('productId')
+      .addGroupBy('label')
+      .addGroupBy('positions')
+      .getRawMany<PendingSlatTicketRow>();
+    for (const row of rows) {
+      const product = products.find((p) => p.id === Number(row.productId));
+      const tier =
+        product === undefined ? undefined : slatBetTier(product, row.label);
+      const ticketPositions = row.positions.replace(/[[\]\s]/g, '');
+      if (tier === undefined || tier.positions.join(',') !== ticketPositions) {
+        throw new BadRequestException(
+          `Slot ${row.productId} tier ${row.label} has unsettled tickets; settle the open round before removing or changing it`,
+        );
+      }
+    }
   }
 
   private validateSlatProduct(
@@ -1093,7 +1156,23 @@ export class GameConfigService {
     if (Number(product.price) < 0) {
       throw new BadRequestException('price must be non-negative');
     }
+    if (product.tiers.length === 0) {
+      throw new BadRequestException(
+        `Slat product ${product.title} has no tiers`,
+      );
+    }
+    const labels = new Set(product.tiers.map((tier) => tier.label));
+    if (labels.size !== product.tiers.length) {
+      throw new BadRequestException(
+        `Slat product ${product.title} has duplicate tier labels`,
+      );
+    }
     for (const tier of product.tiers) {
+      if (tier.label.length === 0) {
+        throw new BadRequestException(
+          `Slat product ${product.title} has a tier without a label`,
+        );
+      }
       if (tier.positions.length === 0) {
         throw new BadRequestException(`Tier ${tier.label} has no positions`);
       }

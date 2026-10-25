@@ -116,7 +116,7 @@ export function buildProfitLossPdf(report: ProfitLossReport): Promise<Buffer> {
   for (const row of report.rows) {
     body.push([
       {
-        text: `${row.type} - (${row.slot} - (${fmtInt(row.winPrice)})`,
+        text: `${row.type} - (${row.slot} - ${fmtInt(row.winPrice)})`,
         alignment: 'center',
       },
       { text: String(row.salesQty), alignment: 'center' },
