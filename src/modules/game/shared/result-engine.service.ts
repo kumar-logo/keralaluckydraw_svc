@@ -137,7 +137,7 @@ export class ResultEngineService {
             oddsKey: outcome.oddsKey,
             storedOdds: Number(order.odds),
             aliasMap,
-            missingPolicy,
+            missingPolicy: missingPolicy as any,
           }).odds;
         }
         winAmount = Number(order.totalAmount) * odds;
@@ -551,7 +551,7 @@ export class ResultEngineService {
     groups: BetGroup[],
     oddsMap: Record<string, number>,
     aliasMap: Record<string, string>,
-    missingPolicy: MissingOddsPolicy,
+    missingPolicy: string,
   ): { payout: number; winners: number } {
     let payout = 0;
     let winners = 0;
@@ -581,7 +581,7 @@ export class ResultEngineService {
           oddsKey: outcome.oddsKey,
           storedOdds: g.storedOdds,
           aliasMap,
-          missingPolicy,
+          missingPolicy: missingPolicy as any,
         }).odds;
       }
       payout += g.stake * odds;

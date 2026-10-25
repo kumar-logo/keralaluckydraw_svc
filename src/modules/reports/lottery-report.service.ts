@@ -5,6 +5,7 @@ import { Repository, DataSource } from 'typeorm';
 import { LotterySalesRollup } from '../../entities/lottery-sales-rollup.entity';
 import { GameList } from '../../entities/game-list.entity';
 import { GameRound } from '../../entities/game-round.entity';
+import { GameSlatTier } from '../../entities/game-slat-tier.entity';
 import {
   TinyFlag,
   CronJobName,
@@ -147,18 +148,26 @@ interface SlatOrderAggRow {
   betType: string;
   number: string;
   winPrice: string;
-  slatProductId: string;
-  slotTitle: string;
-  unitPrice: string;
-  sortOrder: string;
-  posLen: string;
+  slatProductId: string | null;
+  posLen: number;
   qty: string;
   ticketPrice: string;
 }
 
-interface NumberWiseSummaryEntry {
-  orderKey: number;
-  row: NumberWiseSummaryRow;
+interface SlatSlotInfo {
+  productId: number;
+  slotLabel: string;
+  unitPrice: number;
+  winPrice: number;
+  sortOrder: number;
+}
+
+interface SlatHeadlineRow {
+  productId: string;
+  title: string;
+  unitPrice: string;
+  winAmount: string;
+  sortOrder: string;
 }
 
 interface ReportRoundRow {
@@ -190,9 +199,6 @@ interface ResolvedReportFilter {
 
 const ORDER_DRAW_DAY_SQL = 'COALESCE(DATE(gr.draw_time), DATE(o.created_at))';
 
-const SLAT_TIER_JOIN_SQL =
-  "t.product_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.slatProductId')) AS UNSIGNED) AND BINARY t.label = BINARY o.bet_type";
-
 const REPORT_EXCLUDED_ORDER_STATUSES: readonly OrderStatus[] = [
   OrderStatus.Cancelled,
   OrderStatus.Refunded,
@@ -207,6 +213,8 @@ export class LotteryReportService {
     private rollupRepo: Repository<LotterySalesRollup>,
     @InjectRepository(GameList) private gameRepo: Repository<GameList>,
     @InjectRepository(GameRound) private roundRepo: Repository<GameRound>,
+    @InjectRepository(GameSlatTier)
+    private slatTierRepo: Repository<GameSlatTier>,
     private dataSource: DataSource,
     private recorder: CronRunRecorderService,
   ) {}
@@ -579,23 +587,32 @@ export class LotteryReportService {
     const filter = await this.resolveFilter(input);
     const gameName = await this.gameName(filter.gameId);
     const scopeLabel = this.scopeLabel(filter);
+    const slotByProduct = await this.buildSlatSlotIndex(filter.gameId);
     const rows = await this.queryNumberWiseRows(filter);
 
     const groupMap = new Map<number, NumberWiseGroup>();
-    const summaryMap = new Map<string, NumberWiseSummaryEntry>();
+    const summaryMap = new Map<number, NumberWiseSummaryRow>();
     for (const raw of rows) {
       const productId = Number(raw.slatProductId);
+      if (isNaN(productId)) continue;
       const winPrice = Number(raw.winPrice);
       const qty = Number(raw.qty);
       const ticketPrice = Number(Number(raw.ticketPrice).toFixed(2));
-      const sortOrder = Number(raw.sortOrder);
+      const posLen = Number(raw.posLen);
+      const slot = slotByProduct.get(productId) ?? {
+        productId,
+        slotLabel: raw.betType,
+        unitPrice: qty > 0 ? Number((ticketPrice / qty).toFixed(2)) : 0,
+        winPrice,
+        sortOrder: Number.MAX_SAFE_INTEGER,
+      };
 
       let group = groupMap.get(productId);
       if (!group) {
         group = {
-          slotLabel: raw.slotTitle,
-          orderKey: sortOrder,
-          subtotalLabel: this.subtotalLabel(Number(raw.posLen), winPrice),
+          slotLabel: slot.slotLabel,
+          orderKey: slot.sortOrder,
+          subtotalLabel: this.subtotalLabel(posLen, slot.winPrice),
           rows: [],
           totalQty: 0,
         };
@@ -603,7 +620,7 @@ export class LotteryReportService {
       }
       group.rows.push({
         date: this.formatSqlDate(raw.drawDate),
-        slotLabel: raw.slotTitle,
+        slotLabel: slot.slotLabel,
         username: raw.inviteCode ?? '',
         ticketType: raw.betType,
         number: raw.number,
@@ -613,23 +630,19 @@ export class LotteryReportService {
       });
       group.totalQty += qty;
 
-      const summaryKey = `${productId}:${winPrice}`;
-      let summary = summaryMap.get(summaryKey);
+      let summary = summaryMap.get(productId);
       if (!summary) {
         summary = {
-          orderKey: sortOrder,
-          row: {
-            slotLabel: raw.slotTitle,
-            unitPrice: Number(raw.unitPrice),
-            winPrice,
-            totalQty: 0,
-            totalPrice: 0,
-          },
+          slotLabel: slot.slotLabel,
+          unitPrice: slot.unitPrice,
+          winPrice: slot.winPrice,
+          totalQty: 0,
+          totalPrice: 0,
         };
-        summaryMap.set(summaryKey, summary);
+        summaryMap.set(productId, summary);
       }
-      summary.row.totalQty += qty;
-      summary.row.totalPrice += ticketPrice;
+      summary.totalQty += qty;
+      summary.totalPrice += ticketPrice;
     }
 
     const groups = [...groupMap.values()].sort(
@@ -646,14 +659,13 @@ export class LotteryReportService {
       });
     }
 
-    const summaryRows = [...summaryMap.values()]
+    const summaryRows = [...summaryMap.entries()]
       .sort(
-        (a, b) => a.orderKey - b.orderKey || a.row.winPrice - b.row.winPrice,
+        ([idA], [idB]) =>
+          (slotByProduct.get(idA)?.sortOrder ?? Number.MAX_SAFE_INTEGER) -
+          (slotByProduct.get(idB)?.sortOrder ?? Number.MAX_SAFE_INTEGER),
       )
-      .map(({ row }) => ({
-        ...row,
-        totalPrice: Number(row.totalPrice.toFixed(2)),
-      }));
+      .map(([, s]) => ({ ...s, totalPrice: Number(s.totalPrice.toFixed(2)) }));
 
     return {
       pageTitle: `${gameName} - Number Wise Sales Report`,
@@ -672,6 +684,37 @@ export class LotteryReportService {
     };
   }
 
+  private async buildSlatSlotIndex(
+    gameId: number,
+  ): Promise<Map<number, SlatSlotInfo>> {
+    const rows = await this.slatTierRepo
+      .createQueryBuilder('t')
+      .innerJoin('game_slat_product', 'p', 'p.id = t.product_id')
+      .select('p.id', 'productId')
+      .addSelect('p.title', 'title')
+      .addSelect('p.price', 'unitPrice')
+      .addSelect('p.sort_order', 'sortOrder')
+      .addSelect('MAX(t.win_amount)', 'winAmount')
+      .where('p.game_id = :gameId', { gameId })
+      .groupBy('p.id')
+      .addGroupBy('p.title')
+      .addGroupBy('p.price')
+      .addGroupBy('p.sort_order')
+      .getRawMany<SlatHeadlineRow>();
+    const map = new Map<number, SlatSlotInfo>();
+    for (const row of rows) {
+      const productId = Number(row.productId);
+      map.set(productId, {
+        productId,
+        slotLabel: row.title,
+        unitPrice: Number(row.unitPrice),
+        winPrice: Number(row.winAmount),
+        sortOrder: Number(row.sortOrder),
+      });
+    }
+    return map;
+  }
+
   private async queryNumberWiseRows(
     filter: ResolvedReportFilter,
   ): Promise<SlatOrderAggRow[]> {
@@ -680,25 +723,29 @@ export class LotteryReportService {
       .select(`DATE_FORMAT(${ORDER_DRAW_DAY_SQL}, '%Y-%m-%d')`, 'drawDate')
       .addSelect("COALESCE(TIME_FORMAT(gr.draw_time, '%H:%i'), '')", 'slotTime')
       .addSelect('u.invite_code', 'inviteCode')
-      .addSelect('o.bet_type', 'betType')
+      .addSelect(
+        "JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.betType'))",
+        'betType',
+      )
       .addSelect(
         "JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.numbers'))",
         'number',
       )
-      .addSelect('t.win_amount', 'winPrice')
-      .addSelect('p.id', 'slatProductId')
-      .addSelect('p.title', 'slotTitle')
-      .addSelect('p.price', 'unitPrice')
-      .addSelect('p.sort_order', 'sortOrder')
+      .addSelect(
+        "CAST(JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.winPrice')) AS DECIMAL(16,2))",
+        'winPrice',
+      )
+      .addSelect(
+        "JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.slatProductId'))",
+        'slatProductId',
+      )
       .addSelect(
         "CHAR_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.numbers')))",
         'posLen',
       )
-      .addSelect('SUM(o.quantity)', 'qty')
-      .addSelect('SUM(o.total_amount)', 'ticketPrice')
+      .addSelect('COALESCE(SUM(o.quantity), 0)', 'qty')
+      .addSelect('COALESCE(SUM(o.total_amount), 0)', 'ticketPrice')
       .from('orders', 'o')
-      .innerJoin('game_slat_tier', 't', SLAT_TIER_JOIN_SQL)
-      .innerJoin('game_slat_product', 'p', 'p.id = t.product_id')
       .leftJoin(
         'game_rounds',
         'gr',
@@ -706,6 +753,8 @@ export class LotteryReportService {
       )
       .leftJoin('users', 'u', 'u.user_id = o.user_id')
       .where('o.game_id = :gameId', { gameId: filter.gameId })
+      .andWhere("JSON_EXTRACT(o.bet_content, '$.slatProductId') IS NOT NULL")
+      .andWhere("JSON_EXTRACT(o.bet_content, '$.winPrice') IS NOT NULL")
       .andWhere('o.status NOT IN (:...excludedStatuses)', {
         excludedStatuses: REPORT_EXCLUDED_ORDER_STATUSES,
       });
@@ -738,9 +787,6 @@ export class LotteryReportService {
       .addGroupBy('number')
       .addGroupBy('winPrice')
       .addGroupBy('slatProductId')
-      .addGroupBy('slotTitle')
-      .addGroupBy('unitPrice')
-      .addGroupBy('sortOrder')
       .addGroupBy('posLen')
       .getRawMany<SlatOrderAggRow>();
   }
@@ -829,20 +875,19 @@ export class LotteryReportService {
         COALESCE(TIME_FORMAT(gr.draw_time, '%H:%i'), '') AS slot_time,
         o.round_no AS round_no,
         CAST(JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.slot')) AS UNSIGNED) AS slot,
-        o.bet_type AS position,
-        CHAR_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.numbers'))) AS pos_len,
-        JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.numbers')) AS number,
+        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.position')), '') AS position,
+        CHAR_LENGTH(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.numbers')), '')) AS pos_len,
+        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.numbers')), '') AS number,
         o.amount AS price,
-        t.win_amount AS win_price,
+        COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.winPrice')) AS DECIMAL(16,2)), 0) AS win_price,
         SUM(o.quantity) AS sales_qty,
-        SUM(CASE WHEN o.status = ${OrderStatus.Won} THEN o.quantity ELSE 0 END) AS draw_qty,
+        SUM(CASE WHEN o.status = ${OrderStatus.Won} THEN 1 ELSE 0 END) AS draw_qty,
         SUM(CASE WHEN o.status = ${OrderStatus.Won} THEN o.win_amount ELSE 0 END) AS draw_amount
        FROM orders o
-       INNER JOIN game_slat_tier t
-         ON ${SLAT_TIER_JOIN_SQL}
        LEFT JOIN game_rounds gr
          ON gr.game_id = o.game_id AND gr.round_no = o.round_no
        WHERE o.game_id = ?
+         AND JSON_EXTRACT(o.bet_content, '$.slot') IS NOT NULL
          AND o.status NOT IN (${REPORT_EXCLUDED_ORDER_STATUSES.join(', ')})
          ${extraWhere}
        GROUP BY o.game_id, draw_date, slot_time, o.round_no, slot, position, number, o.amount, win_price`,

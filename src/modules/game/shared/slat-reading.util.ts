@@ -24,29 +24,6 @@ export interface SlatReading {
   groups: SlatWinningGroup[];
 }
 
-export function slatTopTier(
-  product: SlatProductView,
-): SlatTierView | undefined {
-  let top: SlatTierView | undefined;
-  for (const tier of product.tiers) {
-    if (top === undefined || tier.tierRank > top.tierRank) top = tier;
-  }
-  return top;
-}
-
-export function slatPayableTiers(product: SlatProductView): SlatTierView[] {
-  if (product.matchMode === SlatMatchMode.Group) return product.tiers;
-  const top = slatTopTier(product);
-  return top === undefined ? [] : [top];
-}
-
-export function slatBetTier(
-  product: SlatProductView,
-  label: string,
-): SlatTierView | undefined {
-  return slatPayableTiers(product).find((tier) => tier.label === label);
-}
-
 function findLongestTier(products: SlatProductView[]): SlatTierView | null {
   let longest: SlatTierView | null = null;
   for (const product of products) {
@@ -100,7 +77,7 @@ export function decodeSlatReading(
   }
   const groups: SlatWinningGroup[] = [];
   for (const product of products) {
-    for (const tier of slatPayableTiers(product)) {
+    for (const tier of product.tiers) {
       const winningDigits = tier.positions
         .map((index) => drawn[index] ?? '')
         .join('');

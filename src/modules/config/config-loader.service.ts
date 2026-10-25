@@ -18,10 +18,6 @@ import { UiMysteryBoxGradient } from '../../entities/ui-mystery-box-gradient.ent
 import { UiResultTab } from '../../entities/ui-result-tab.entity';
 import { ShareChannel } from '../../entities/share-channel.entity';
 import { OddsAlias } from '../../entities/odds-alias.entity';
-import {
-  MissingOddsPolicy,
-  parseMissingOddsPolicy,
-} from '../game/shared/odds.service';
 
 @Injectable()
 export class ConfigLoaderService implements OnModuleInit {
@@ -293,10 +289,8 @@ export class ConfigLoaderService implements OnModuleInit {
     return (await this.getAppConfigEntity()).resultDecisionBudgetMs;
   }
 
-  async getOddsMissingPolicy(): Promise<MissingOddsPolicy> {
-    return parseMissingOddsPolicy(
-      (await this.getAppConfigEntity()).oddsMissingPolicy,
-    );
+  async getOddsMissingPolicy(): Promise<string> {
+    return (await this.getAppConfigEntity()).oddsMissingPolicy;
   }
 
   async getBigwinMinAmount(): Promise<number> {

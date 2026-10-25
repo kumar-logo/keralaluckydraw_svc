@@ -32,6 +32,7 @@ import {
 import {
   MECHANIC_BY_FAMILY,
   resolveFamily,
+  MechanicBetContent,
 } from '../../game/shared/mechanics';
 import { GameMechanicsConfig } from '../../game/shared/game-config.types';
 import { AdminGameService } from './admin-game.service';
@@ -44,6 +45,7 @@ interface SlatConfigPayload {
 interface SlatReadingOrderContent {
   slatProductId?: number;
   betType?: string;
+  position?: string;
   numbers?: string;
   betCode?: string;
   betNum?: string;
@@ -225,23 +227,26 @@ export class AdminGameConfigService {
     for (const order of orders) {
       const content = this.readSlatContent(order.betContent);
       const stake = Number(order.totalAmount);
-      const quantity = Number(order.quantity);
-      const position = order.betType;
       let payout = Number(order.winAmount);
       let isWin = order.status === OrderStatus.Won;
+      let position = content.position ? String(content.position) : '';
 
       if (isPreview && mechanic) {
         const outcome = mechanic.evaluate({
-          betType: order.betType,
-          betContent: content,
+          betType: order.betType ? order.betType : '',
+          betContent:
+            order.betContent !== null && order.betContent !== undefined
+              ? (order.betContent as MechanicBetContent)
+              : {},
           result: previewResult,
           cfg: previewCfg,
         });
-        isWin = outcome.won;
-        payout =
-          outcome.won && outcome.fixedWin !== undefined
-            ? outcome.fixedWin * quantity
-            : 0;
+        isWin = !!outcome.won;
+        const fixedWin = outcome.fixedWin ? outcome.fixedWin : 0;
+        const quantity = order.quantity ? order.quantity : 1;
+        payout = isWin ? Number(fixedWin) * quantity : 0;
+        position =
+          outcome.prizeLevel != null ? String(outcome.prizeLevel) : position;
       }
 
       totalSales += stake;
@@ -252,10 +257,10 @@ export class AdminGameConfigService {
       );
       const product = productPnl.get(productId);
       if (product) {
-        product.salesQty += quantity;
+        product.salesQty += 1;
         product.salesAmount += stake;
         if (isWin) {
-          product.winnersQty += quantity;
+          product.winnersQty += 1;
           product.payout += payout;
         }
       }
@@ -269,14 +274,14 @@ export class AdminGameConfigService {
       user.payout += payout;
       userPnl.set(order.userId, user);
 
-      if (isWin) {
+      if (isWin && position) {
         const key = tierKey(productId, position);
         const existingTier = tierWinners.get(key);
         const tier =
           existingTier !== undefined
             ? existingTier
             : { winnersQty: 0, payout: 0 };
-        tier.winnersQty += quantity;
+        tier.winnersQty += 1;
         tier.payout += payout;
         tierWinners.set(key, tier);
       }

@@ -16,8 +16,9 @@ import { Transaction } from '../../../entities/transaction.entity';
 import { PaginatedResponse } from '../../../common/dto/response.dto';
 import { GameEngineService } from '../shared/game-engine.service';
 import { GameConfigService } from '../shared/game-config.service';
-import { derivePositionLabels, slatBetTier } from '../shared/slat-reading.util';
-import { TinyFlag } from '../../../common/enums';
+import { SlatProductView } from '../shared/game-config.types';
+import { derivePositionLabels } from '../shared/slat-reading.util';
+import { SlatMatchMode, TinyFlag } from '../../../common/enums';
 import {
   ThreeDigitCreateOrderDto,
   ThreeDigitDrawHistoryDto,
@@ -457,8 +458,11 @@ export class ThreeDigitService {
       if (pick.slatProductId != null) {
         const product = slatProducts.find((p) => p.id === pick.slatProductId);
         if (!product) throw new BadRequestException('Slat product not found');
-        const tier = slatBetTier(product, pick.betType);
-        if (tier === undefined || tier.positions.length === 0) {
+        const isGroup = product.matchMode === SlatMatchMode.Group;
+        const tier = isGroup
+          ? product.tiers.find((t) => t.label === pick.betType)
+          : [...product.tiers].sort((a, b) => b.tierRank - a.tierRank)[0];
+        if (!tier || tier.positions.length === 0) {
           throw new BadRequestException('Slat bet type not found');
         }
         const pickWidth = tier.positions.length;
@@ -488,7 +492,7 @@ export class ThreeDigitService {
               position: pick.betType,
               positions: tier.positions,
               slot: Math.round(amount),
-              winPrice: tier.winAmount,
+              winPrice: this.slatWinPrice(product, pick.betType),
             },
             amount,
             quantity: count,
@@ -689,6 +693,15 @@ export class ThreeDigitService {
 
   private getOddsByBetType(): number {
     return 1;
+  }
+
+  private slatWinPrice(product: SlatProductView, label: string): number {
+    if (product.matchMode === SlatMatchMode.Group) {
+      const tier = product.tiers.find((t) => t.label === label);
+      return tier ? Number(tier.winAmount) : 0;
+    }
+    const top = [...product.tiers].sort((a, b) => b.tierRank - a.tierRank)[0];
+    return top ? Number(top.winAmount) : 0;
   }
 
   private async loadGameMap(orders: Order[]): Promise<Map<number, GameList>> {

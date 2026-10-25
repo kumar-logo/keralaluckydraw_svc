@@ -22,6 +22,81 @@ export interface SlatProductView {
   tiers: SlatTierView[];
 }
 
+export const DEFAULT_THREE_DIGIT_SLAT_PRODUCTS: SlatProductView[] = [
+  {
+    digitCount: 3,
+    price: 11,
+    matchMode: SlatMatchMode.Group,
+    title: 'Slat-1D',
+    status: 1,
+    tiers: [
+      { label: 'A', positions: [0], winAmount: 100, tierRank: 0 },
+      { label: 'B', positions: [1], winAmount: 100, tierRank: 0 },
+      { label: 'C', positions: [2], winAmount: 100, tierRank: 0 },
+    ],
+  },
+  {
+    digitCount: 3,
+    price: 12,
+    matchMode: SlatMatchMode.Group,
+    title: 'Slat-2D',
+    status: 1,
+    tiers: [
+      { label: 'AB', positions: [0, 1], winAmount: 1000, tierRank: 0 },
+      { label: 'BC', positions: [1, 2], winAmount: 1000, tierRank: 0 },
+      { label: 'AC', positions: [0, 2], winAmount: 1000, tierRank: 0 },
+    ],
+  },
+  {
+    digitCount: 3,
+    price: 10,
+    matchMode: SlatMatchMode.Ladder,
+    title: 'Slat-3D',
+    status: 1,
+    tiers: [
+      { label: 'C', positions: [2], winAmount: 0, tierRank: 1 },
+      { label: 'BC', positions: [1, 2], winAmount: 100, tierRank: 2 },
+      { label: 'ABC', positions: [0, 1, 2], winAmount: 5000, tierRank: 3 },
+    ],
+  },
+  {
+    digitCount: 3,
+    price: 15,
+    matchMode: SlatMatchMode.Ladder,
+    title: 'Slat-3D',
+    status: 1,
+    tiers: [
+      { label: 'C', positions: [2], winAmount: 25, tierRank: 1 },
+      { label: 'BC', positions: [1, 2], winAmount: 250, tierRank: 2 },
+      { label: 'ABC', positions: [0, 1, 2], winAmount: 6250, tierRank: 3 },
+    ],
+  },
+  {
+    digitCount: 3,
+    price: 25,
+    matchMode: SlatMatchMode.Ladder,
+    title: 'Slat-3D',
+    status: 1,
+    tiers: [
+      { label: 'C', positions: [2], winAmount: 50, tierRank: 1 },
+      { label: 'BC', positions: [1, 2], winAmount: 500, tierRank: 2 },
+      { label: 'ABC', positions: [0, 1, 2], winAmount: 10000, tierRank: 3 },
+    ],
+  },
+  {
+    digitCount: 3,
+    price: 30,
+    matchMode: SlatMatchMode.Ladder,
+    title: 'Slat-3D',
+    status: 1,
+    tiers: [
+      { label: 'C', positions: [2], winAmount: 50, tierRank: 1 },
+      { label: 'BC', positions: [1, 2], winAmount: 500, tierRank: 2 },
+      { label: 'ABC', positions: [0, 1, 2], winAmount: 15000, tierRank: 3 },
+    ],
+  },
+];
+
 export const defaultRng: Rng = { next: () => Math.random() };
 
 export function rngInt(rng: Rng, min: number, max: number): number {

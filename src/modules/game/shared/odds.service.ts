@@ -4,20 +4,6 @@ import { resolveOddsClass } from './bet-vocabulary';
 export type OddsSource = 'config' | 'alias' | 'stored' | 'missing';
 export type MissingOddsPolicy = 'use_stored' | 'void_bet' | 'error';
 
-const MISSING_ODDS_POLICIES: readonly MissingOddsPolicy[] = [
-  'use_stored',
-  'void_bet',
-  'error',
-];
-
-export function parseMissingOddsPolicy(value: string): MissingOddsPolicy {
-  const policy = MISSING_ODDS_POLICIES.find((candidate) => candidate === value);
-  if (policy === undefined) {
-    throw new Error(`Unknown odds missing policy: ${value}`);
-  }
-  return policy;
-}
-
 export interface OddsResolution {
   odds: number;
   source: OddsSource;

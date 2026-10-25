@@ -1,9 +1,4 @@
-import {
-  decodeSlatReading,
-  slatBetTier,
-  slatPayableTiers,
-  slatTopTier,
-} from './slat-reading.util';
+import { decodeSlatReading } from './slat-reading.util';
 import { SlatMatchMode } from '../../../common/enums';
 import { SlatProductView } from './game-config.types';
 
@@ -73,19 +68,21 @@ describe('decodeSlatReading', () => {
     expect(reading.readingText).toBe('1234-xABC');
   });
 
-  it('lists only the payable tier of each ladder slot', () => {
+  it('lists every winning group with its drawn digits and prize', () => {
     const reading = decodeSlatReading('1234', FOUR_FIVE);
-    expect(
-      reading.groups.map((g) => [
-        g.productId,
-        g.tierLabel,
-        g.winningDigits,
-        g.winAmount,
-      ]),
-    ).toEqual([
-      [1, 'xABC', '1234', 100000],
-      [2, 'xABC', '1234', 500000],
-    ]);
+    const abc = reading.groups.find(
+      (g) => g.productId === 2 && g.tierLabel === 'ABC',
+    );
+    expect(abc?.winningDigits).toBe('234');
+    expect(abc?.winAmount).toBe(10000);
+    const c = reading.groups.find(
+      (g) => g.productId === 2 && g.tierLabel === 'C',
+    );
+    expect(c?.winningDigits).toBe('4');
+    expect(c?.winAmount).toBe(100);
+    const jackpot = reading.groups.find((g) => g.productId === 1);
+    expect(jackpot?.winningDigits).toBe('1234');
+    expect(jackpot?.winAmount).toBe(100000);
   });
 
   it('decodes a 3-digit draw with A B C labels', () => {
@@ -96,61 +93,8 @@ describe('decodeSlatReading', () => {
       { index: 2, label: 'C', digit: '3' },
     ]);
     expect(reading.readingText).toBe('123-ABC');
-    expect(reading.groups).toEqual([
-      {
-        productId: 10,
-        title: 'Slat-3D Rs.10',
-        matchMode: SlatMatchMode.Ladder,
-        tierLabel: 'ABC',
-        positions: [0, 1, 2],
-        winningDigits: '123',
-        winAmount: 5000,
-      },
-    ]);
-  });
-});
-
-const GROUP: SlatProductView = {
-  id: 20,
-  digitCount: 3,
-  price: 12,
-  matchMode: SlatMatchMode.Group,
-  title: 'Slat-2D',
-  status: 1,
-  tiers: [
-    { label: 'AB', positions: [0, 1], winAmount: 1000, tierRank: 0 },
-    { label: 'BC', positions: [1, 2], winAmount: 1000, tierRank: 0 },
-  ],
-};
-
-describe('slat payable tiers', () => {
-  it('a ladder slot pays only its highest-rank tier', () => {
-    expect(slatTopTier(THREE[0])?.label).toBe('ABC');
-    expect(slatPayableTiers(THREE[0]).map((tier) => tier.label)).toEqual([
-      'ABC',
-    ]);
-    expect(slatBetTier(THREE[0], 'ABC')?.winAmount).toBe(5000);
-    expect(slatBetTier(THREE[0], 'BC')).toBeUndefined();
-    expect(slatBetTier(THREE[0], 'C')).toBeUndefined();
-  });
-
-  it('a group slot pays each of its tiers by label', () => {
-    expect(slatPayableTiers(GROUP).map((tier) => tier.label)).toEqual([
-      'AB',
-      'BC',
-    ]);
-    expect(slatBetTier(GROUP, 'BC')?.positions).toEqual([1, 2]);
-    expect(slatBetTier(GROUP, 'AC')).toBeUndefined();
-  });
-
-  it('a slot without tiers has nothing payable', () => {
-    const empty: SlatProductView = {
-      ...GROUP,
-      matchMode: SlatMatchMode.Ladder,
-      tiers: [],
-    };
-    expect(slatTopTier(empty)).toBeUndefined();
-    expect(slatPayableTiers(empty)).toEqual([]);
-    expect(slatBetTier(empty, 'AB')).toBeUndefined();
+    const bc = reading.groups.find((g) => g.tierLabel === 'BC');
+    expect(bc?.winningDigits).toBe('23');
+    expect(bc?.winAmount).toBe(100);
   });
 });

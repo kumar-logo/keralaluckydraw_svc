@@ -32,6 +32,7 @@ import {
   GameConfigService,
   RaceRunnerView,
 } from '../../game/shared/game-config.service';
+import { DEFAULT_THREE_DIGIT_SLAT_PRODUCTS } from '../../game/shared/game-config.types';
 import {
   GameRoundsListQuery,
   GameOptionsQuery,
@@ -310,6 +311,13 @@ export class AdminGameService {
     };
     const game = this.gameRepo.create(mapped);
     const saved = await this.gameRepo.save(game);
+
+    if (saved.gameType === GameType.ThreeDigit) {
+      await this.gameConfig.replaceSlatProducts(
+        saved.id,
+        DEFAULT_THREE_DIGIT_SLAT_PRODUCTS,
+      );
+    }
 
     if (
       saved.gameType === GameType.ThreeDigit ||

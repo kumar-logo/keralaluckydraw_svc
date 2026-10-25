@@ -5,6 +5,7 @@ import { LotteryReportService } from './lottery-report.service';
 import { LotterySalesRollup } from '../../entities/lottery-sales-rollup.entity';
 import { GameList } from '../../entities/game-list.entity';
 import { GameRound } from '../../entities/game-round.entity';
+import { GameSlatTier } from '../../entities/game-slat-tier.entity';
 import { Order } from '../../entities/order.entity';
 import { User } from '../../entities/user.entity';
 import { CronModule } from '../cron/cron.module';
@@ -15,6 +16,7 @@ import { CronModule } from '../cron/cron.module';
       LotterySalesRollup,
       GameList,
       GameRound,
+      GameSlatTier,
       Order,
       User,
     ]),
