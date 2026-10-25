@@ -187,6 +187,13 @@ export class UpdateAdminUserDto {
   password?: string;
 }
 
+export class RoundIdDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  roundId: number;
+}
+
 export class SetDrawResultDto {
   @Type(() => Number)
   @IsInt()

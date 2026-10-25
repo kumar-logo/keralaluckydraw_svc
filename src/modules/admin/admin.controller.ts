@@ -24,6 +24,7 @@ import {
   SetUserPasswordDto,
   UpdateAdminUserDto,
   SetDrawResultDto,
+  RoundIdDto,
   UpdateOddsConfigDto,
   LotteryReportDownloadQueryDto,
   TestSmsDto,
@@ -454,11 +455,17 @@ export class AdminController {
   }
 
   @RequirePermission(Permission.Lottery)
+  @Get('settlement/:roundId/preview')
+  previewResettle(@Param('roundId', ParseIntPipe) roundId: number) {
+    return this.adminService.previewResettle(roundId);
+  }
+
+  @RequirePermission(Permission.Lottery)
   @HttpCode(200)
   @Post('settlement/retry')
   retrySettlement(
     @CurrentUser('sub') adminId: number,
-    @Body() body: { roundId: number },
+    @Body() body: RoundIdDto,
   ) {
     return this.adminService.retrySettlement(body.roundId, adminId);
   }

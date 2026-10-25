@@ -403,6 +403,10 @@ export class AdminService {
     return this.lotteryDraw.cancelRound(roundId, adminId);
   }
 
+  async previewResettle(roundId: number) {
+    return this.lotteryDraw.previewResettle(roundId);
+  }
+
   async retrySettlement(roundId: number, adminId: number) {
     return this.lotteryDraw.retrySettlement(roundId, adminId);
   }

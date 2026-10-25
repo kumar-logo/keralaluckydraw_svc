@@ -169,6 +169,10 @@ export class AdminLotteryDrawService {
     }
   }
 
+  async previewResettle(roundId: number) {
+    return this.settlement.previewResettle(roundId);
+  }
+
   async retrySettlement(roundId: number, adminId: number) {
     const report = await this.settlement.resettleRound(roundId);
     await this.audit.createAuditLog(
@@ -176,7 +180,16 @@ export class AdminLotteryDrawService {
       'retry_settlement',
       'game_round',
       String(roundId),
-      { report },
+      {
+        roundNo: report.roundNo,
+        totalOrders: report.totalOrders,
+        changedOrders: report.changedOrders,
+        previousPayout: report.previousPayout,
+        nextPayout: report.nextPayout,
+        creditTotal: report.creditTotal,
+        debitApplied: report.debitApplied,
+        debitShortfall: report.debitShortfall,
+      },
     );
     return report;
   }

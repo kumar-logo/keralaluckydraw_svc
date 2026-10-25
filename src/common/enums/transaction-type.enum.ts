@@ -3,6 +3,7 @@ export enum TransactionType {
   Withdraw = 'withdraw',
   Bet = 'bet',
   Win = 'win',
+  WinReversal = 'win_reversal',
   WinBonus = 'win_bonus',
   WheelDraw = 'wheel_draw',
   BoxDraw = 'box_draw',

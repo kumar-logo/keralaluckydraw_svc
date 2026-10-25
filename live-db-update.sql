@@ -1685,5 +1685,22 @@ SELECT g.`id`, 'upi', 0
 --    WHERE g.provider_code = 'payindia';
 
 -- =============================================================================
+-- §50  RE-SETTLE: "Winning Reversal" transaction type (2026-10-25)
+-- -----------------------------------------------------------------------------
+-- Draw Management > Re-settle now re-checks every ticket of a settled round and
+-- moves only the difference: missed wins are credited as 'win', over-paid wins
+-- are taken back as 'win_reversal' (never below a zero balance). This row makes
+-- the reversal show under the player's "Winnings" filter with its own label.
+-- Same as migration 1741410000000-AddWinReversalTransactionType. Idempotent.
+-- =============================================================================
+
+INSERT INTO `transaction_types` (`type_code`, `type_name`, `category`, `filter_group`)
+SELECT 'win_reversal', 'Winning Reversal', 'expense', 'win' FROM DUAL
+ WHERE NOT EXISTS (SELECT 1 FROM `transaction_types` WHERE `type_code` = 'win_reversal');
+
+-- Verify:
+--   SELECT * FROM transaction_types WHERE type_code = 'win_reversal';
+
+-- =============================================================================
 -- END OF live-db-update.sql
 -- =============================================================================

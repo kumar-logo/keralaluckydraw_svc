@@ -40,6 +40,12 @@ const types = [
     filterGroup: 'win',
   },
   {
+    typeCode: 'win_reversal',
+    typeName: 'Winning Reversal',
+    category: 'expense',
+    filterGroup: 'win',
+  },
+  {
     typeCode: 'win_bonus',
     typeName: 'Bonus Winning',
     category: 'income',
