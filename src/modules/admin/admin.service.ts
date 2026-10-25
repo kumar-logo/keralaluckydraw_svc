@@ -86,6 +86,7 @@ import {
   AdminFinanceService,
   ThirdPartyTransactionQuery,
   RechargeRecordListResult,
+  RechargeProofResult,
   WithdrawRecordListResult,
 } from './services/admin-finance.service';
 import { AdminLotteryManagementService } from './services/admin-lottery-management.service';
@@ -308,6 +309,10 @@ export class AdminService {
     endDate?: string;
   }): Promise<RechargeRecordListResult> {
     return this.finance.getRechargeRecords(dto);
+  }
+
+  getRechargeProof(orderNo: string): Promise<RechargeProofResult> {
+    return this.finance.getRechargeProof(orderNo);
   }
 
   streamRechargeCsv(

@@ -8,6 +8,9 @@ import {
 } from 'typeorm';
 
 @Entity('recharge_records')
+@Index('IDX_recharge_records_created_at', ['createdAt'])
+@Index('IDX_recharge_records_status_created_at', ['status', 'createdAt'])
+@Index('IDX_recharge_records_user_created_at', ['userId', 'createdAt'])
 export class RechargeRecord {
   @PrimaryGeneratedColumn({ type: 'bigint', unsigned: true })
   id: number;

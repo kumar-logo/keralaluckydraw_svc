@@ -85,7 +85,15 @@ export interface RechargeRecordRow extends RechargeRecord {
   gatewayMode: string;
   additionalVerification: number;
   manualFallback: number;
-  proofUrl?: string;
+  hasProof: boolean;
+}
+
+export interface RechargeProofResult {
+  proofUrl: string;
+}
+
+interface RechargeProofIdRaw {
+  id: string;
 }
 
 export interface RechargeRecordListResult
@@ -184,10 +192,7 @@ export class AdminFinanceService {
       qb: ReturnType<Repository<RechargeRecord>['createQueryBuilder']>,
     ) => this.applyRechargeFilters(qb, filters);
     const qb = applySearch(
-      this.rcRepo
-        .createQueryBuilder('r')
-        .addSelect('r.proofImage')
-        .orderBy('r.created_at', 'DESC'),
+      this.rcRepo.createQueryBuilder('r').orderBy('r.created_at', 'DESC'),
     );
     if (status !== undefined) {
       qb.andWhere('r.status = :s', { s: status });
@@ -200,6 +205,9 @@ export class AdminFinanceService {
       .getMany();
     const userMap = await this.loadUsernameMap(
       list.map((record) => record.userId),
+    );
+    const proofIds = await this.loadRechargeProofIds(
+      list.map((record) => Number(record.id)),
     );
     const channelIds = [
       ...new Set(
@@ -224,7 +232,7 @@ export class AdminFinanceService {
           ? Number(gateway.additionalVerification)
           : 0,
         manualFallback: gateway ? Number(gateway.manualFallback) : 0,
-        proofUrl: record.proofImage ? record.proofImage : undefined,
+        hasProof: proofIds.has(Number(record.id)),
       };
     });
     const paginated = new PaginatedResponse(
@@ -234,6 +242,29 @@ export class AdminFinanceService {
       dto.pageSize,
     );
     return { ...paginated, statusCounts };
+  }
+
+  private async loadRechargeProofIds(ids: number[]): Promise<Set<number>> {
+    if (ids.length === 0) return new Set();
+    const rows = await this.rcRepo
+      .createQueryBuilder('r')
+      .select('r.id', 'id')
+      .where('r.id IN (:...ids)', { ids })
+      .andWhere('r.proof_image IS NOT NULL')
+      .getRawMany<RechargeProofIdRaw>();
+    return new Set(rows.map((row) => Number(row.id)));
+  }
+
+  async getRechargeProof(orderNo: string): Promise<RechargeProofResult> {
+    const record = await this.rcRepo
+      .createQueryBuilder('r')
+      .select('r.id')
+      .addSelect('r.proofImage')
+      .where('r.order_no = :orderNo', { orderNo })
+      .getOne();
+    if (!record) throw new NotFoundException('Record not found');
+    if (!record.proofImage) throw new NotFoundException('Proof not found');
+    return { proofUrl: record.proofImage };
   }
 
   private async loadRechargeStatusCounts(

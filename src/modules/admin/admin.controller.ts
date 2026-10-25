@@ -293,6 +293,11 @@ export class AdminController {
     return this.adminService.getRechargeRecords(body);
   }
 
+  @Get('finance/recharge/proof/:orderNo')
+  getRechargeProof(@Param('orderNo') orderNo: string) {
+    return this.adminService.getRechargeProof(orderNo);
+  }
+
   @RequirePermission(Permission.Finance)
   @SkipResponseTransform()
   @Get('finance/recharge/export')

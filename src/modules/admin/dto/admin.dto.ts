@@ -343,10 +343,13 @@ export class DashboardQueryDto {
 export class RechargeListQueryDto {
   @Type(() => Number)
   @IsInt()
+  @Min(1)
   pageNo: number;
 
   @Type(() => Number)
   @IsInt()
+  @Min(1)
+  @Max(100)
   pageSize: number;
 
   @IsOptional()
