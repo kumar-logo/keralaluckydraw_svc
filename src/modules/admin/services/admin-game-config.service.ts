@@ -12,6 +12,9 @@ import { GameInfoCacheStore } from '../../../common/game-info-cache.store';
 import { Order } from '../../../entities/order.entity';
 import { GameOddsConfig } from '../../../entities/game-odds-config.entity';
 import { GameFeeConfig } from '../../../entities/game-fee-config.entity';
+import { ResultDecision } from '../../../entities/result-decision.entity';
+import { LotteryDrawDetail } from '../../../entities/lottery-draw-detail.entity';
+import { LotterySalesRollup } from '../../../entities/lottery-sales-rollup.entity';
 import {
   GameType,
   TinyFlag,
@@ -37,6 +40,8 @@ import {
 import { GameMechanicsConfig } from '../../game/shared/game-config.types';
 import { AdminGameService } from './admin-game.service';
 import { OddsUpdateInput, UpdateGameResultConfigDto } from '../dto/admin.dto';
+
+const DISPLAY_TIME_ZONE = 'Asia/Kolkata';
 
 interface SlatConfigPayload {
   slatProducts?: SlatProductView[];
@@ -439,7 +444,6 @@ export class AdminGameConfigService {
         drawDelay: game.drawDelaySec,
         autoGenerate: game.autoGenerate === 1,
         maxPrize: game.maxPrize,
-        scheduledDrawTime: game.scheduledDrawTime,
         scheduledDrawTimes,
         startDate: game.startDate,
       },
@@ -490,12 +494,27 @@ export class AdminGameConfigService {
       updates.scheduledDrawTime = drawTimes.length > 0 ? drawTimes[0] : null;
     }
 
+    const isManual =
+      game.isLottery === TinyFlag.Yes && effectiveAutoGenerate === TinyFlag.No;
+    const wasManual =
+      game.isLottery === TinyFlag.Yes && game.autoGenerate === TinyFlag.No;
+    const droppedRounds =
+      isManual && wasManual && drawTimes.length > 0
+        ? await this.findDroppedManualRounds(gameId, drawTimes)
+        : [];
+    if (droppedRounds.length > 0) {
+      await this.assertRoundsHaveNoTickets(gameId, droppedRounds);
+    }
+
     if (Object.keys(updates).length > 0) {
       await this.gameRepo.update(gameId, updates);
     }
 
-    const isManual =
-      game.isLottery === TinyFlag.Yes && effectiveAutoGenerate === TinyFlag.No;
+    if (droppedRounds.length > 0) {
+      await this.deleteManualRounds(gameId, droppedRounds);
+      this.gameInfoCache.invalidateAll();
+    }
+
     if (isManual && drawTimes.length > 0) {
       const stopBetBeforeSec =
         updates.stopBetBeforeSec !== undefined
@@ -513,9 +532,119 @@ export class AdminGameConfigService {
       'update_schedule',
       'game',
       String(gameId),
-      config,
+      {
+        ...config,
+        deletedRounds: droppedRounds.map((r) => r.roundNo),
+      },
     );
     return this.getGameSchedule(gameId);
+  }
+
+  private async findDroppedManualRounds(
+    gameId: number,
+    drawTimes: Date[],
+  ): Promise<GameRound[]> {
+    const kept = new Set(drawTimes.map((d) => Math.floor(d.getTime() / 1000)));
+    const now = Date.now();
+    const liveRounds = await this.roundRepo.find({
+      where: {
+        gameId,
+        status: In([RoundStatus.BettingOpen, RoundStatus.BettingClosed]),
+      },
+      order: { drawTime: 'ASC' },
+    });
+    return liveRounds.filter(
+      (r) =>
+        r.drawTime &&
+        r.drawTime.getTime() > now &&
+        !kept.has(Math.floor(r.drawTime.getTime() / 1000)),
+    );
+  }
+
+  private async assertRoundsHaveNoTickets(
+    gameId: number,
+    rounds: GameRound[],
+  ): Promise<void> {
+    const rows = await this.orderRepo
+      .createQueryBuilder('o')
+      .select('o.round_no', 'roundNo')
+      .addSelect('COUNT(*)', 'tickets')
+      .where('o.game_id = :gameId', { gameId })
+      .andWhere('o.round_no IN (:...roundNos)', {
+        roundNos: rounds.map((r) => r.roundNo),
+      })
+      .groupBy('o.round_no')
+      .getRawMany<{ roundNo: string; tickets: string }>();
+    if (rows.length === 0) return;
+    const ticketsByRound = new Map(
+      rows.map((row) => [row.roundNo, Number(row.tickets)]),
+    );
+    const blocked = rounds
+      .filter((r) => (ticketsByRound.get(r.roundNo) ?? 0) > 0)
+      .map(
+        (r) =>
+          `${this.formatDrawTime(r.drawTime)} (round ${r.roundNo}, ${ticketsByRound.get(r.roundNo)} tickets)`,
+      );
+    throw new BadRequestException(
+      `Cannot remove draw time ${blocked.join(', ')} — tickets are already sold. Cancel the round in Draw Management to refund the tickets first.`,
+    );
+  }
+
+  private async deleteManualRounds(
+    gameId: number,
+    rounds: GameRound[],
+  ): Promise<void> {
+    const ids = rounds.map((r) => r.id);
+    const roundNos = rounds.map((r) => r.roundNo);
+    await this.dataSource.transaction(async (manager) => {
+      const locked = await manager.getRepository(GameRound).find({
+        where: {
+          id: In(ids),
+          status: In([RoundStatus.BettingOpen, RoundStatus.BettingClosed]),
+        },
+        lock: { mode: 'pessimistic_write' },
+      });
+      const now = Date.now();
+      if (
+        locked.length !== ids.length ||
+        locked.some((r) => r.drawTime.getTime() <= now)
+      ) {
+        throw new BadRequestException(
+          'A removed draw changed status while saving — reload the schedule and try again.',
+        );
+      }
+      const tickets = await manager
+        .getRepository(Order)
+        .createQueryBuilder('o')
+        .setLock('pessimistic_write')
+        .where('o.game_id = :gameId', { gameId })
+        .andWhere('o.round_no IN (:...roundNos)', { roundNos })
+        .getCount();
+      if (tickets > 0) {
+        throw new BadRequestException(
+          'Tickets were sold on a removed draw while saving — reload the schedule and cancel that round in Draw Management instead.',
+        );
+      }
+      await manager.delete(ResultDecision, { roundId: In(ids) });
+      await manager.delete(LotteryDrawDetail, { gameId, roundNo: In(roundNos) });
+      await manager.delete(LotterySalesRollup, {
+        gameId,
+        roundNo: In(roundNos),
+      });
+      await manager.delete(GameRound, { id: In(ids) });
+    });
+  }
+
+  private formatDrawTime(drawTime: Date): string {
+    return drawTime.toLocaleString('en-IN', {
+      timeZone: DISPLAY_TIME_ZONE,
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    });
   }
 
   async getCashrainWindows(gameId: number) {
