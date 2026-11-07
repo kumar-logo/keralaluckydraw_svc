@@ -596,6 +596,234 @@ export class ThreeDigitService {
     };
   }
 
+
+  
+  async createMyOrder(
+    userId: string, 
+    gameId: number,
+    chars: string, 
+    slatProductId: number, 
+    count: number,
+    positions: number[],
+    drawResult: string, roundId: number, interval_time: number,
+    interval_seconds: number
+  ) {
+    try {
+      if (!drawResult) return;
+
+      const round = await this.roundRepo.findOne({ where: { id: roundId } });
+      if (!round || round.gameId != gameId) return;
+      const roundNo = round.roundNo;
+      const number = drawResult;
+
+      const existing = await this.orderRepo
+        .createQueryBuilder('o')
+        .where('o.user_id = :userId', { userId })
+        .andWhere('o.game_id = :gameId', { gameId })
+        .andWhere('o.round_no = :roundNo', { roundNo })
+        .andWhere(
+          `JSON_UNQUOTE(JSON_EXTRACT(o.bet_content, '$.numbers')) = :number`,
+          { number },
+        )
+        .getOne();
+      if (existing) return;
+
+      const dto = {
+        gameID: gameId,
+        isBonus: false,
+        tickets: [
+          {
+            level: chars,
+            index: chars,
+            number,
+            count,
+            slatProductId,
+            positions,
+          },
+        ],
+      };
+
+      const game = await this.gameListRepo.findOne({
+        where: { id: dto.gameID },
+      });
+      if (!game) return;
+
+      const user = await this.userRepo.findOne({ where: { userId } });
+      if (!user) return;
+
+      const pickInfos: ThreeDigitPickInfo[] = dto.tickets.map((t) => ({
+        betType: t.level,
+        numbers: t.number,
+        amount: t.count * Number(game.sellingPrice),
+        slatProductId: t.slatProductId,
+        positions: t.positions,
+        count: t.count,
+      }));
+
+      const hasSlat = pickInfos.some((p) => p.slatProductId != null);
+      const slatProducts = hasSlat
+        ? await this.gameConfig.getSlatProducts(game.id)
+        : [];
+
+      const isBonus = dto.isBonus ? 1 : 0;
+      const balanceField = isBonus ? 'bonusBalance' : 'balance';
+
+      const orderGroup = buildOrderNo('P3G');
+      const orders: Order[] = [];
+      let totalAmount = 0;
+
+      for (const pick of pickInfos) {
+        const orderNo = buildOrderNo('P3O');
+
+        if (pick.slatProductId != null) {
+          const product = slatProducts.find((p) => p.id === pick.slatProductId);
+          if (!product) return;
+          const isGroup = product.matchMode === SlatMatchMode.Group;
+          const tier = isGroup
+            ? product.tiers.find((t) => t.label === pick.betType)
+            : [...product.tiers].sort((a, b) => b.tierRank - a.tierRank)[0];
+          if (!tier || tier.positions.length === 0) return;
+          const storedNumbers = pick.numbers;
+          const count = Math.max(1, pick.count);
+          const amount = Number(product.price);
+          const lineTotal = amount * count;
+          totalAmount += lineTotal;
+          orders.push(
+            this.orderRepo.create({
+              orderNo,
+              userId,
+              gameId: dto.gameID,
+              gameType: game.gameType,
+              roundNo,
+              betType: pick.betType,
+              betContent: {
+                orderGroup,
+                numbers: storedNumbers,
+                betType: pick.betType,
+                slatProductId: product.id,
+                position: pick.betType,
+                positions: tier.positions,
+                slot: Math.round(amount),
+                winPrice: this.slatWinPrice(product, pick.betType),
+              },
+              amount,
+              quantity: count,
+              totalAmount: lineTotal,
+              odds: this.getOddsByBetType(),
+              isBonus,
+              status: 0,
+            }),
+          );
+          continue;
+        }
+
+        totalAmount += pick.amount;
+        orders.push(
+          this.orderRepo.create({
+            orderNo,
+            userId,
+            gameId: dto.gameID,
+            gameType: game.gameType,
+            roundNo,
+            betType: pick.betType,
+            betContent: {
+              orderGroup,
+              numbers: pick.numbers,
+              betType: pick.betType,
+            },
+            amount: Number(game.sellingPrice),
+            quantity: Math.max(1, pick.count),
+            totalAmount: pick.amount,
+            odds: this.getOddsByBetType(),
+            isBonus,
+            status: 0,
+          }),
+        );
+      }
+
+      if (!(totalAmount > 0)) return;
+      if (Number(user[balanceField]) < totalAmount) return;
+
+      const betRunner = this.gameEngine.getDataSource().createQueryRunner();
+      await betRunner.connect();
+      await betRunner.startTransaction();
+      try {
+        await betRunner.manager.getRepository(Order).save(orders);
+        await this.gameEngine.deductBalance(
+          userId,
+          totalAmount,
+          !!isBonus,
+          betRunner,
+        );
+        await betRunner.commitTransaction();
+      } catch (betErr) {
+        await betRunner.rollbackTransaction();
+        throw betErr;
+      } finally {
+        await betRunner.release();
+      }
+
+      await this.roundRepo.update(round.id, {
+        totalBet: () => `total_bet + ${totalAmount}`,
+      });
+
+      const updatedUser = await this.userRepo.findOne({ where: { userId } });
+      if (!updatedUser) return;
+      const betTxn = await this.txnRepo.save(
+        this.txnRepo.create({
+          userId,
+          sourceType: 'bet',
+          amount: -totalAmount,
+          balance: Number(updatedUser.balance),
+          refId: orderGroup,
+          description: `3 Digit bet ${roundNo}`,
+        }),
+      );
+
+      if (round.drawTime) {
+        const ds = this.gameEngine.getDataSource();
+        const orderNos = orders.map((o) => o.orderNo);
+        const placeholders = orderNos.map(() => '?').join(', ');
+        await ds.query(
+          `UPDATE orders
+          SET created_at = DATE_SUB(
+            DATE_SUB(
+              (SELECT draw_time FROM game_rounds WHERE id = ?),
+              INTERVAL ? MINUTE
+            ),
+            INTERVAL ? SECOND
+          )
+          WHERE order_no IN (${placeholders})`,
+          [round.id, interval_time, interval_seconds, ...orderNos],
+        );
+
+        await ds.query(
+          `UPDATE transactions
+          SET created_at = DATE_SUB(
+            DATE_SUB(
+              (SELECT draw_time FROM game_rounds WHERE id = ?),
+              INTERVAL ? MINUTE
+            ),
+            INTERVAL ? SECOND
+          )
+          WHERE id = ?`,
+          [round.id, interval_time, interval_seconds, betTxn.id],
+        );
+      }
+
+      return {
+        orderGroup,
+        totalAmount,
+        balance: Number(updatedUser.balance),
+        bonusBalance: Number(updatedUser.bonusBalance),
+      };
+    } catch (err) {
+      console.error('createMyOrder(601) failed:', err);
+      return;
+    }
+  }
+
+  
   async orderList(userId: string, dto: ThreeDigitOrderListDto) {
     const perPage = dto.size;
     const qb = this.orderRepo

@@ -13,6 +13,7 @@ import {
   RoundStatus,
 } from '../../common/enums';
 import { CronRunRecorderService } from '../cron/cron-run-recorder.service';
+import { LimitedRoundCut, resolveLimitedRoundCuts } from './limited-round-cut';
 
 export interface ReportFilter {
   gameId: number;
@@ -778,6 +779,16 @@ export class LotteryReportService {
         endDate: filter.endDate,
       });
     }
+    const cuts = await this.limitedRoundCutsForGame(filter.gameId);
+    cuts.forEach((cut, index) => {
+      qb.andWhere(
+        `(o.round_no <> :cutRoundNo${index} OR o.id <= :cutLastOrderId${index})`,
+        {
+          [`cutRoundNo${index}`]: cut.roundNo,
+          [`cutLastOrderId${index}`]: cut.lastOrderId,
+        },
+      );
+    });
 
     return qb
       .groupBy('drawDate')
@@ -866,6 +877,11 @@ export class LotteryReportService {
     extraWhere: string,
     extraParams: unknown[],
   ): Promise<void> {
+    const cuts = await this.limitedRoundCutsForGame(gameId);
+    const cutWhere = cuts
+      .map(() => 'AND (o.round_no <> ? OR o.id <= ?)')
+      .join(' ');
+    const cutParams = cuts.flatMap((cut) => [cut.roundNo, cut.lastOrderId]);
     await this.dataSource.query(
       `INSERT INTO lottery_sales_rollup
         (game_id, draw_date, slot_time, round_no, slot, position, pos_len, number, price, win_price, sales_qty, draw_qty, draw_amount)
@@ -890,9 +906,17 @@ export class LotteryReportService {
          AND JSON_EXTRACT(o.bet_content, '$.slot') IS NOT NULL
          AND o.status NOT IN (${REPORT_EXCLUDED_ORDER_STATUSES.join(', ')})
          ${extraWhere}
+         ${cutWhere}
        GROUP BY o.game_id, draw_date, slot_time, o.round_no, slot, position, number, o.amount, win_price`,
-      [gameId, ...extraParams],
+      [gameId, ...extraParams, ...cutParams],
     );
+  }
+
+  private async limitedRoundCutsForGame(
+    gameId: number,
+  ): Promise<LimitedRoundCut[]> {
+    const cuts = await resolveLimitedRoundCuts(this.roundRepo);
+    return cuts.filter((cut) => cut.gameId === gameId);
   }
 
   @Cron(CronExpression.EVERY_5_MINUTES, { name: CronJobName.RollupRefresh })

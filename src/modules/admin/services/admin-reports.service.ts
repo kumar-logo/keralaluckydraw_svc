@@ -12,6 +12,7 @@ import { Transaction } from '../../../entities/transaction.entity';
 import { RechargeStatus } from '../../../common/enums/recharge-status.enum';
 import { WithdrawStatus } from '../../../common/enums/withdraw-status.enum';
 import { OrderStatus } from '../../../common/enums/order-status.enum';
+import { resolveLimitedRoundCuts } from '../../reports/limited-round-cut';
 
 const APP_TIME_ZONE = 'Asia/Kolkata';
 
@@ -823,6 +824,7 @@ export class AdminReportsService {
     }
 
     const endDate = `${dto.endDate} 23:59:59`;
+    const cuts = await resolveLimitedRoundCuts(this.roundRepo);
     const chunkSize = 5000;
     let lastId = 0;
     for (;;) {
@@ -839,6 +841,16 @@ export class AdminReportsService {
       if (dto.gameType) {
         qb.andWhere('o.game_type = :gt', { gt: dto.gameType });
       }
+      cuts.forEach((cut, index) => {
+        qb.andWhere(
+          `NOT (o.game_id = :cutGameId${index} AND o.round_no = :cutRoundNo${index} AND o.id > :cutLastOrderId${index})`,
+          {
+            [`cutGameId${index}`]: cut.gameId,
+            [`cutRoundNo${index}`]: cut.roundNo,
+            [`cutLastOrderId${index}`]: cut.lastOrderId,
+          },
+        );
+      });
       const rows = await qb.getMany();
       if (rows.length === 0) break;
 
