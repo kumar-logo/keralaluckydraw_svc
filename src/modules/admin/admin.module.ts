@@ -88,6 +88,7 @@ import { PaymentModule } from '../payment/payment.module';
 import { AuthModule } from '../auth/auth.module';
 import { FcmModule } from '../fcm/fcm.module';
 import { AppVersionModule } from '../app-version/app-version.module';
+import { ThreeDigitModule } from '../game/three-digit/three-digit.module';
 
 @Module({
   imports: [
@@ -162,6 +163,7 @@ import { AppVersionModule } from '../app-version/app-version.module';
     AuthModule,
     FcmModule,
     AppVersionModule,
+    ThreeDigitModule,
   ],
   controllers: [AdminController],
   providers: [
